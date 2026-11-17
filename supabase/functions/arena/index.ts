@@ -5,8 +5,44 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-arena-admin',
 };
+
+async function signAdminToken(secret: string): Promise<string> {
+  const exp = Date.now() + 24 * 60 * 60 * 1000;
+  const payload = String(exp);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sigBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  const sigHex = Array.from(new Uint8Array(sigBuf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return `${payload}.${sigHex}`;
+}
+
+async function verifyAdminToken(token: string, secret: string): Promise<boolean> {
+  const [payload, sigHex] = token.split('.');
+  if (!payload || !sigHex) return false;
+  const exp = Number(payload);
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const expectedBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  const expectedHex = Array.from(new Uint8Array(expectedBuf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return expectedHex === sigHex;
+}
 
 const caseAnswerKeys: Record<
   string,
@@ -83,6 +119,16 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const { action, ...payload } = body || {};
 
+    if (action === 'adminLogin') {
+      const passcode = String(payload.passcode || '').trim();
+      const expectedPasscode = Deno.env.get('ADMIN_PASSCODE') || 'ARENA-ADMIN-2026';
+      if (!passcode || passcode !== expectedPasscode) {
+        return json({ error: 'Invalid organizer passcode.' }, 403);
+      }
+      const adminToken = await signAdminToken(serviceRoleKey);
+      return json({ adminToken, isAdmin: true });
+    }
+
     if (action === 'listMyTeams') {
       const { data, error } = await adminClient
         .from('teams')
@@ -143,6 +189,37 @@ Deno.serve(async (req) => {
           .eq('team_id', team.id);
       }
       return json({ id: team.id, name: team.name, inviteCode: team.invite_code });
+    }
+
+    if (action === 'leaveTeam') {
+      const teamId = String(payload.teamId || '');
+      let query = adminClient
+        .from('teams')
+        .select('*')
+        .contains('member_ids', [user.id]);
+      if (teamId) {
+        query = query.eq('id', teamId);
+      }
+      const { data: team } = await query.maybeSingle();
+      if (!team) {
+        return json({ left: true });
+      }
+      const members = Array.isArray(team.member_ids) ? team.member_ids : [];
+      const nextMembers = members.filter((id: string) => id !== user.id);
+      if (nextMembers.length === 0) {
+        await adminClient.from('teams').delete().eq('id', team.id);
+      } else {
+        await adminClient.from('teams').update({ member_ids: nextMembers }).eq('id', team.id);
+        await adminClient
+          .from('rankings')
+          .update({ member_ids: nextMembers })
+          .eq('team_id', team.id);
+      }
+      const { count } = await adminClient
+        .from('teams')
+        .select('id', { count: 'exact', head: true });
+      await adminClient.from('stats').upsert({ id: 1, registered_teams: count ?? 0 });
+      return json({ left: true });
     }
 
     if (action === 'beginInvestigation') {
@@ -334,8 +411,12 @@ Deno.serve(async (req) => {
       return json({ id: game.id, name: game.name, caseId: game.case_id, status: game.status });
     }
 
+    const tokenAdmin = await verifyAdminToken(
+      req.headers.get('x-arena-admin') || '',
+      serviceRoleKey
+    );
     const isAdmin = Boolean(
-      user.app_metadata?.role === 'admin' || user.app_metadata?.admin === true
+      tokenAdmin || user.app_metadata?.role === 'admin' || user.app_metadata?.admin === true
     );
     if (!isAdmin) return json({ error: 'Administrator access required.' }, 403);
 

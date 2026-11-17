@@ -22,6 +22,7 @@ import {
   LayoutDashboard,
   Lightbulb,
   LockKeyhole,
+  LogOut,
   Mail,
   Menu,
   Moon,
@@ -209,7 +210,8 @@ function formatAnnouncementDate(createdAt?: string | { toDate?: () => Date }): s
 export default function App() {
   const [page, setPage] = useState<PageName>('Home');
   const [user, setUser] = useState<User | null>(null);
-  const [admin, setAdmin] = useState(false);
+  const [adminToken, setAdminToken] = useState<string>(() => stored<string>('arena-admin-token', ''));
+  const [admin, setAdmin] = useState<boolean>(() => Boolean(stored<string>('arena-admin-token', '')));
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
   const [useLocalBackend, setUseLocalBackend] = useState(!supabaseConfigured);
   const localBackendRef = useRef(!supabaseConfigured);
@@ -252,7 +254,7 @@ export default function App() {
     } = client.auth.onAuthStateChange((event, session) => {
       const currentUser = session?.user || null;
       setUser(currentUser);
-      setAdmin(isAdminUser(currentUser));
+      setAdmin(isAdminUser(currentUser) || Boolean(stored<string>('arena-admin-token', '')));
       setAuthReady(true);
       if (event === 'INITIAL_SESSION' && !currentUser && !creatingAnonymousSession) {
         creatingAnonymousSession = true;
@@ -291,6 +293,9 @@ export default function App() {
       if (playerId) {
         headers['x-arena-player'] = playerId;
       }
+      if (adminToken) {
+        headers['x-arena-admin'] = adminToken;
+      }
       const response = await fetch('/api/arena', {
         method: 'POST',
         headers,
@@ -302,7 +307,7 @@ export default function App() {
       }
       return body;
     },
-    [user?.id]
+    [user?.id, adminToken]
   );
 
   useEffect(() => {
@@ -326,8 +331,12 @@ export default function App() {
 
       const loadLocalState = async () => {
         try {
+          const stateHeaders: Record<string, string> = { 'x-arena-player': user.id };
+          if (adminToken) {
+            stateHeaders['x-arena-admin'] = adminToken;
+          }
           const response = await fetch('/api/state', {
-            headers: { 'x-arena-player': user.id },
+            headers: stateHeaders,
           });
           if (!response.ok) return;
           const payload = (await response.json()) as {
@@ -335,8 +344,18 @@ export default function App() {
             games?: Record<string, unknown>[];
             announcements?: Record<string, unknown>[];
             stats?: { registered_teams?: number };
+            isAdmin?: boolean;
           };
           applyState(payload);
+          if (typeof payload.isAdmin === 'boolean') {
+            if (payload.isAdmin) {
+              setAdmin(true);
+            } else if (!isAdminUser(user) && adminToken) {
+              localStorage.removeItem('arena-admin-token');
+              setAdminToken('');
+              setAdmin(false);
+            }
+          }
         } catch {
           // Keep existing state if offline.
         }
@@ -428,7 +447,7 @@ export default function App() {
     return () => {
       void client.removeChannel(channel);
     };
-  }, [user, useLocalBackend, activateLocalBackend]);
+  }, [user, useLocalBackend, activateLocalBackend, adminToken]);
 
   useEffect(() => {
     if (!supabase || useLocalBackend) return undefined;
@@ -561,6 +580,7 @@ export default function App() {
         return callLocalArena<T>(name, data);
       }
       const { data: response, error } = await supabase.functions.invoke('arena', {
+        headers: adminToken ? { 'x-arena-admin': adminToken } : undefined,
         body: { action: name, ...data },
       });
       if (error) {
@@ -577,23 +597,46 @@ export default function App() {
             parsedBody = null;
           }
         }
+        const detailMessage = parsedBody?.error || parsedBody?.message || error.message || '';
         const edgeUnavailable =
           !errorContext ||
           error.name === 'FunctionsFetchError' ||
           error.message.includes('Failed to send a request to the Edge Function') ||
           (errorContext.status === 404 && !parsedBody?.error) ||
-          parsedBody?.code === 'NOT_FOUND';
+          parsedBody?.code === 'NOT_FOUND' ||
+          detailMessage.includes('schema cache') ||
+          detailMessage.includes('Could not find the table') ||
+          detailMessage.includes('PGRST205');
 
         if (edgeUnavailable) {
           activateLocalBackend();
           return callLocalArena<T>(name, data);
         }
-        throw new Error(parsedBody?.error || parsedBody?.message || error.message);
+        throw new Error(detailMessage);
       }
       return response as T;
     },
-    [activateLocalBackend, callLocalArena]
+    [activateLocalBackend, callLocalArena, adminToken]
   );
+
+  const unlockAdmin = async (passcode: string) => {
+    const data = await invoke<{ adminToken: string; isAdmin: boolean }>('adminLogin', {
+      passcode,
+    });
+    if (data.adminToken) {
+      localStorage.setItem('arena-admin-token', JSON.stringify(data.adminToken));
+      setAdminToken(data.adminToken);
+    }
+    setAdmin(true);
+    setNotice('Admin console unlocked.');
+  };
+
+  const lockAdmin = () => {
+    localStorage.removeItem('arena-admin-token');
+    setAdminToken('');
+    setAdmin(isAdminUser(user));
+    setNotice('Admin console locked.');
+  };
 
   useEffect(() => {
     if (!user) {
@@ -896,6 +939,45 @@ export default function App() {
     );
   };
 
+  const [logoutBusy, setLogoutBusy] = useState(false);
+
+  const logOut = async () => {
+    setLogoutBusy(true);
+    try {
+      if (teamInfo) {
+        await invoke('leaveTeam', { teamId: teamInfo.id }).catch(() => {});
+      }
+      localStorage.removeItem('arena-admin-token');
+      localStorage.removeItem('arena-progress');
+      localStorage.removeItem('arena-completed');
+      setAdminToken('');
+      setAdmin(false);
+      setTeamInfo(null);
+      setTeamName('');
+      setTeamCode('');
+      setActiveCase(null);
+      setResult(null);
+      setSessionReady(false);
+      setReport('');
+      setSelectedEvidence([]);
+      setTimelineOrder([]);
+      setHintCount(0);
+      setElapsed(0);
+      setPage('Home');
+      setMobileMenu(false);
+      setNotice('');
+      if (supabase) {
+        await supabase.auth.signOut().catch(() => {});
+        const { error } = await supabase.auth.signInAnonymously();
+        if (error) {
+          setTeamEntryError(error.message);
+        }
+      }
+    } finally {
+      setLogoutBusy(false);
+    }
+  };
+
   const copyTeamInvite = () => {
     if (!teamInfo) return;
     void navigator.clipboard?.writeText(teamInfo.inviteCode).then(() => {
@@ -990,15 +1072,13 @@ export default function App() {
           ))}
         </nav>
 
-        {admin && (
-          <button
-            className={`nav-link admin-link ${page === 'Admin' ? 'active' : ''}`}
-            onClick={() => goTo('Admin')}
-          >
-            <Settings2 size={17} />
-            <span>Admin console</span>
-          </button>
-        )}
+        <button
+          className={`nav-link admin-link ${page === 'Admin' ? 'active' : ''}`}
+          onClick={() => goTo('Admin')}
+        >
+          <Settings2 size={17} />
+          <span>Admin console</span>
+        </button>
 
         <div className="side-bottom">
           <div className="account-chip">
@@ -1017,6 +1097,15 @@ export default function App() {
               {copiedCode ? <Check size={14} /> : <Copy size={14} />}
             </button>
           </div>
+          <button
+            type="button"
+            className="leave-team-btn"
+            onClick={() => void logOut()}
+            disabled={logoutBusy}
+          >
+            <LogOut size={14} />
+            <span>{logoutBusy ? 'Logging out…' : 'Log out'}</span>
+          </button>
         </div>
       </aside>
 
@@ -1069,6 +1158,16 @@ export default function App() {
               }}
             >
               <Radio size={17} className={muted ? 'muted-icon' : ''} />
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Log out"
+              title="Log out"
+              disabled={logoutBusy}
+              onClick={() => void logOut()}
+            >
+              <LogOut size={17} />
             </button>
           </div>
         </header>
@@ -1177,6 +1276,8 @@ export default function App() {
                 exportResults={exportResults}
                 invoke={invoke}
                 setNotice={setNotice}
+                unlockAdmin={unlockAdmin}
+                lockAdmin={lockAdmin}
               />
             )}
           </motion.div>
@@ -2469,6 +2570,8 @@ function AdminView({
   exportResults,
   invoke,
   setNotice,
+  unlockAdmin,
+  lockAdmin,
 }: {
   admin: boolean;
   games: GameLobby[];
@@ -2476,6 +2579,8 @@ function AdminView({
   exportResults: () => void;
   invoke: <T = Record<string, unknown>>(name: string, data?: Record<string, unknown>) => Promise<T>;
   setNotice: (v: string) => void;
+  unlockAdmin: (passcode: string) => Promise<void>;
+  lockAdmin: () => void;
 }) {
   const [eventForm, setEventForm] = useState({
     name: '',
@@ -2485,7 +2590,24 @@ function AdminView({
   });
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
   const [busy, setBusy] = useState(false);
+  const [passcode, setPasscode] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockError, setUnlockError] = useState('');
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
+
+  const handleUnlock = async (event: FormEvent) => {
+    event.preventDefault();
+    setUnlockBusy(true);
+    setUnlockError('');
+    try {
+      await unlockAdmin(passcode);
+      setPasscode('');
+    } catch (error) {
+      setUnlockError(error instanceof Error ? error.message : 'Invalid organizer passcode.');
+    } finally {
+      setUnlockBusy(false);
+    }
+  };
 
   const createEvent = async (event: FormEvent) => {
     event.preventDefault();
@@ -2535,7 +2657,27 @@ function AdminView({
       <div className="empty-state admin-locked">
         <LockKeyhole size={26} />
         <h2>Administrator access required</h2>
-        <p>This panel is restricted to accounts with the Supabase app metadata admin claim.</p>
+        <p>Enter the organizer passcode to unlock the Arena Control Room.</p>
+        <form className="admin-unlock-form" onSubmit={handleUnlock}>
+          <input
+            type="password"
+            required
+            value={passcode}
+            onChange={(event) => setPasscode(event.target.value)}
+            placeholder="Organizer passcode"
+            aria-label="Organizer passcode"
+          />
+          <button className="button button-primary" disabled={unlockBusy}>
+            <KeyRound size={15} />
+            <span>{unlockBusy ? 'Verifying...' : 'Unlock admin'}</span>
+          </button>
+        </form>
+        {unlockError && (
+          <p className="auth-error">
+            <ShieldAlert size={14} />
+            <span>{unlockError}</span>
+          </p>
+        )}
       </div>
     );
   }
@@ -2547,10 +2689,16 @@ function AdminView({
         title="Arena control room"
         description="Manage events and announcements. Case answers and score validation remain server-controlled."
         action={
-          <button className="button button-outline" onClick={exportResults}>
-            <ArrowDown size={15} />
-            <span>Export results</span>
-          </button>
+          <div className="admin-header-actions">
+            <button className="button button-outline" onClick={exportResults}>
+              <ArrowDown size={15} />
+              <span>Export results</span>
+            </button>
+            <button className="button button-outline" onClick={lockAdmin}>
+              <LockKeyhole size={15} />
+              <span>Lock admin</span>
+            </button>
+          </div>
         }
       />
 

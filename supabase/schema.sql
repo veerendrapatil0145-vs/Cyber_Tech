@@ -73,18 +73,23 @@ alter table public.stats enable row level security;
 alter table public.sessions enable row level security;
 
 -- Read policies (writes are performed via the Edge Function using service_role)
+drop policy if exists "Public read stats" on public.stats;
 create policy "Public read stats" on public.stats
   for select using (true);
 
+drop policy if exists "Authenticated read rankings" on public.rankings;
 create policy "Authenticated read rankings" on public.rankings
   for select to authenticated using (true);
 
+drop policy if exists "Authenticated read games" on public.games;
 create policy "Authenticated read games" on public.games
   for select to authenticated using (true);
 
+drop policy if exists "Authenticated read announcements" on public.announcements;
 create policy "Authenticated read announcements" on public.announcements
   for select to authenticated using (true);
 
+drop policy if exists "Team members read sessions" on public.sessions;
 create policy "Team members read sessions" on public.sessions
   for select to authenticated using (
     exists (
@@ -94,9 +99,23 @@ create policy "Team members read sessions" on public.sessions
     )
   );
 
--- Enable Realtime on public tables
-alter publication supabase_realtime add table public.rankings;
-alter publication supabase_realtime add table public.games;
-alter publication supabase_realtime add table public.announcements;
-alter publication supabase_realtime add table public.stats;
-alter publication supabase_realtime add table public.sessions;
+-- Enable Realtime on public tables (safe if already added)
+do $$
+declare
+  tbl text;
+begin
+  foreach tbl in array array['rankings', 'games', 'announcements', 'stats', 'sessions'] loop
+    if not exists (
+      select 1
+      from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = tbl
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', tbl);
+    end if;
+  end loop;
+end $$;
+
+-- Reload PostgREST schema cache immediately
+notify pgrst, 'reload schema';
