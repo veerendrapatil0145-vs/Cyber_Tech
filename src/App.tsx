@@ -75,9 +75,10 @@ interface AdminTeamSummary {
   createdAt: string;
 }
 
-type AnswersState = Record<string, number | string | undefined> & { report?: string };
-
-const navigation: Array<{ label: Exclude<PageName, 'Investigation' | 'Admin'>; icon: typeof LayoutDashboard }> = [
+const navigation: Array<{
+  label: Exclude<PageName, 'Investigation' | 'Admin'>;
+  icon: typeof LayoutDashboard;
+}> = [
   { label: 'Home', icon: LayoutDashboard },
   { label: 'Dashboard', icon: Activity },
   { label: 'Play Investigation', icon: Swords },
@@ -133,9 +134,8 @@ export default function App() {
   const playerId = useMemo(() => getOrCreatePlayerId(), []);
   const [page, setPage] = useState<PageName>('Home');
   const [admin, setAdmin] = useState<boolean>(() => Boolean(getStoredAdminToken()));
-  const [difficulty, setDifficulty] = useState<'All' | 'Easy' | 'Medium' | 'Hard'>('All');
   const [activeCase, setActiveCase] = useState<InvestigationCase | null>(null);
-  const [answers, setAnswers] = useState<AnswersState>({});
+  const [report, setReport] = useState('');
   const [selectedEvidence, setSelectedEvidence] = useState<number[]>([]);
   const [timelineOrder, setTimelineOrder] = useState<string[]>([]);
   const [hintCount, setHintCount] = useState(0);
@@ -179,10 +179,7 @@ export default function App() {
     setTeamLoading(true);
     setTeamEntryError('');
 
-    Promise.all([
-      invokeArena<{ teams: TeamInfo[] }>('listMyTeams'),
-      fetchArenaState(),
-    ])
+    Promise.all([invokeArena<{ teams: TeamInfo[] }>('listMyTeams'), fetchArenaState()])
       .then(([teamRes, stateRes]) => {
         if (!active) return;
         setTeamInfo(teamRes.teams?.[0] || null);
@@ -229,11 +226,9 @@ export default function App() {
         }
         void fetchSession(teamInfo.id, activeCase.id).then((session) => {
           if (!session?.progress) return;
-          setAnswers((current) => ({
-            ...current,
-            ...(session.progress.answers || {}),
-            ...(session.progress.report ? { report: session.progress.report } : {}),
-          }));
+          if (typeof session.progress.report === 'string') {
+            setReport(session.progress.report);
+          }
           setSelectedEvidence(session.progress.selectedEvidence || []);
           if (session.progress.timelineOrder?.length) {
             setTimelineOrder(session.progress.timelineOrder);
@@ -249,29 +244,23 @@ export default function App() {
     if (!activeCase || !sessionReady || result) return undefined;
     const progress = {
       caseId: activeCase.id,
-      answers,
+      report,
       selectedEvidence,
       timelineOrder,
       hintCount,
     };
     localStorage.setItem('arena-progress', JSON.stringify(progress));
     const timeout = window.setTimeout(() => {
-      const numericAnswers: Record<string, number> = {};
-      for (const [key, val] of Object.entries(answers)) {
-        if (key !== 'report' && typeof val === 'number') {
-          numericAnswers[key] = val;
-        }
-      }
       void invokeArena('saveInvestigationProgress', {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
-        answers: { ...numericAnswers, report: answers.report || '' },
+        report,
         selectedEvidence,
         timelineOrder,
       }).catch(() => {});
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [activeCase, answers, selectedEvidence, timelineOrder, hintCount, sessionReady, teamInfo, result]);
+  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, teamInfo, result]);
 
   useEffect(() => {
     if (!activeCase || result) return undefined;
@@ -295,11 +284,6 @@ export default function App() {
     const serverClosed = teamRanking ? Object.keys(teamRanking.caseScores || {}) : [];
     return [...new Set(serverClosed)];
   }, [leaderboard, teamInfo, playerId]);
-
-  const visibleCases = useMemo(
-    () => cases.filter((gameCase) => difficulty === 'All' || gameCase.difficulty === difficulty),
-    [difficulty]
-  );
 
   const filteredScores = useMemo(
     () =>
@@ -362,7 +346,7 @@ export default function App() {
 
     const localProgress = stored<{
       caseId?: string;
-      answers?: AnswersState;
+      report?: string;
       selectedEvidence?: number[];
       timelineOrder?: string[];
     } | null>('arena-progress', null);
@@ -371,7 +355,7 @@ export default function App() {
     setActiveCase(gameCase);
     setPage('Investigation');
     setSessionReady(false);
-    setAnswers(resumeLocal?.answers || {});
+    setReport(resumeLocal?.report || '');
     setSelectedEvidence(resumeLocal?.selectedEvidence || []);
     setTimelineOrder(
       resumeLocal?.timelineOrder?.length ? resumeLocal.timelineOrder : [...gameCase.timeline]
@@ -385,7 +369,6 @@ export default function App() {
     try {
       const session = await invokeArena<{
         progress?: {
-          answers?: Record<string, number>;
           report?: string;
           selectedEvidence?: number[];
           timelineOrder?: string[];
@@ -396,16 +379,12 @@ export default function App() {
 
       const remoteProgress = session.progress || {};
       const hasRemote =
-        Object.keys(remoteProgress.answers || {}).length > 0 ||
         (remoteProgress.selectedEvidence?.length || 0) > 0 ||
         Boolean(remoteProgress.report) ||
         (remoteProgress.timelineOrder?.length || 0) > 0;
 
       if (hasRemote) {
-        setAnswers({
-          ...(remoteProgress.answers || {}),
-          ...(remoteProgress.report ? { report: remoteProgress.report } : {}),
-        });
+        setReport(remoteProgress.report || '');
         setSelectedEvidence(remoteProgress.selectedEvidence || []);
         setTimelineOrder(
           remoteProgress.timelineOrder?.length
@@ -446,10 +425,9 @@ export default function App() {
     try {
       const response = await invokeArena<CaseScore>('submitInvestigation', {
         caseId: activeCase.id,
-        answers,
         selectedEvidence,
         timelineOrder,
-        report: answers.report || '',
+        report,
         teamId: teamInfo.id,
       });
       setResult(response);
@@ -548,13 +526,12 @@ export default function App() {
   };
 
   const exportResults = () => {
-    const header = ['Rank', 'Team', 'Difficulty', 'Score', 'Completion time (s)'];
+    const header = ['Rank', 'Team', 'Score', 'Completion time (s)'];
     const rows = leaderboard
       .filter((item) => item.mode === 'Team')
       .map((item, index) => [
         index + 1,
         item.teamName || '',
-        item.difficulty || '',
         item.score || 0,
         item.elapsedSeconds || '',
       ]);
@@ -656,11 +633,7 @@ export default function App() {
               {copiedCode ? <Check size={14} /> : <Copy size={14} />}
             </button>
           </div>
-          <button
-            type="button"
-            className="leave-team-btn"
-            onClick={leaveCurrentTeam}
-          >
+          <button type="button" className="leave-team-btn" onClick={leaveCurrentTeam}>
             <LogOut size={13} />
             <span>Switch team</span>
           </button>
@@ -746,8 +719,8 @@ export default function App() {
             {page === 'Investigation' && activeCase ? (
               <InvestigationView
                 activeCase={activeCase}
-                answers={answers}
-                setAnswers={setAnswers}
+                report={report}
+                setReport={setReport}
                 selectedEvidence={selectedEvidence}
                 setSelectedEvidence={setSelectedEvidence}
                 timelineOrder={timelineOrder}
@@ -792,9 +765,7 @@ export default function App() {
 
             {page === 'Play Investigation' && (
               <CaseLibrary
-                visibleCases={visibleCases}
-                difficulty={difficulty}
-                setDifficulty={setDifficulty}
+                visibleCases={cases}
                 openCase={openCase}
                 completed={completed}
                 search={search}
@@ -1025,7 +996,9 @@ function HomeView({
             <br />
             <em>leaves a trace.</em>
           </h1>
-          <p>Investigate, analyze forensic logs, reconstruct timelines, and submit your team verdict.</p>
+          <p>
+            Investigate, analyze forensic logs, reconstruct timelines, and submit your team verdict.
+          </p>
           <div className="hero-actions">
             <button className="button button-primary" onClick={() => setPage('Play Investigation')}>
               <Swords size={16} />
@@ -1035,13 +1008,13 @@ function HomeView({
           </div>
           <div className="hero-proof">
             <span>
-              <b>10</b> original cases
-            </span>
-            <span>
-              <b>3</b> difficulty levels
+              <b>{caseList.length}</b> original cases
             </span>
             <span>
               <b>2–4</b> per team
+            </span>
+            <span>
+              <b>Live</b> team rankings
             </span>
           </div>
         </div>
@@ -1066,7 +1039,7 @@ function HomeView({
           </div>
         </div>
         <div className="hero-index">
-          01 <span>/</span> 10
+          01 <span>/</span> {String(caseList.length).padStart(2, '0')}
         </div>
       </section>
 
@@ -1085,7 +1058,7 @@ function HomeView({
             <FileText size={17} />
           </span>
           <div>
-            <strong>10</strong>
+            <strong>{caseList.length}</strong>
             <small>CASE FILES</small>
           </div>
         </div>
@@ -1161,7 +1134,7 @@ function HomeView({
                 <div>
                   <strong>{game.name}</strong>
                   <small>
-                    {game.difficulty} · {game.participantCount || 0} teams · Code{' '}
+                    {game.participantCount || 0} teams · Code{' '}
                     <span className="mono-inline">{game.inviteCode}</span>
                   </small>
                 </div>
@@ -1191,9 +1164,9 @@ function HomeView({
           </div>
           <div className="steps-grid">
             {[
-              ['01', 'Choose your case', 'Pick a difficulty and start an investigation with your team.'],
+              ['01', 'Choose your case', 'Open an active case file and start an investigation with your team.'],
               ['02', 'Read the evidence', 'Inspect the synthetic records and collect the clues that matter.'],
-              ['03', 'Build your theory', 'Answer questions, arrange events, and use hints carefully.'],
+              ['03', 'Reconstruct the timeline', 'Arrange events chronologically, review suspects, and use hints carefully.'],
               [
                 '04',
                 'Submit a verdict',
@@ -1284,7 +1257,7 @@ function DashboardView({
         <Metric label="TEAM RANK" value={myRank ? `#${myRank}` : '—'} icon={Trophy} accent="orange" />
         <Metric
           label="TEAM STANDING"
-          value={completed.length > 3 ? 'VETERAN' : 'ACTIVE'}
+          value={completed.length >= caseList.length ? 'COMPLETED' : 'ACTIVE'}
           icon={Shield}
           accent="blue"
         />
@@ -1297,9 +1270,6 @@ function DashboardView({
               <div className="eyebrow">RECOMMENDED NEXT</div>
               <h2>{nextCase.title}</h2>
             </div>
-            <span className={`difficulty-tag ${nextCase.difficulty.toLowerCase()}`}>
-              {nextCase.difficulty}
-            </span>
           </div>
           <CaseTile
             gameCase={nextCase}
@@ -1348,16 +1318,12 @@ function DashboardView({
 
 function CaseLibrary({
   visibleCases,
-  difficulty,
-  setDifficulty,
   openCase,
   completed,
   search,
   setSearch,
 }: {
   visibleCases: InvestigationCase[];
-  difficulty: 'All' | 'Easy' | 'Medium' | 'Hard';
-  setDifficulty: (d: 'All' | 'Easy' | 'Medium' | 'Hard') => void;
   openCase: (c: InvestigationCase) => void;
   completed: string[];
   search: string;
@@ -1371,7 +1337,7 @@ function CaseLibrary({
   return (
     <>
       <PageHeading
-        eyebrow="CASE ARCHIVE · 10 FILES"
+        eyebrow={`CASE ARCHIVE · ${visibleCases.length} FILES`}
         title="Play Investigation"
         description="Every case is a self-contained fictional simulation. Collect clues, connect the timeline, and submit your verdict."
         action={
@@ -1383,18 +1349,6 @@ function CaseLibrary({
       />
 
       <div className="library-tools">
-        <div className="segmented-control" role="group" aria-label="Filter cases by difficulty">
-          {(['All', 'Easy', 'Medium', 'Hard'] as const).map((level) => (
-            <button
-              key={level}
-              className={difficulty === level ? 'selected' : ''}
-              onClick={() => setDifficulty(level)}
-            >
-              {level}
-            </button>
-          ))}
-        </div>
-
         <label className="search-box">
           <Search size={16} />
           <input
@@ -1422,7 +1376,7 @@ function CaseLibrary({
         <EmptyState
           icon={Search}
           title="No case files found"
-          copy="Try another title or difficulty filter."
+          copy="Try another case title or category keyword."
         />
       )}
 
@@ -1462,9 +1416,6 @@ function CaseTile({
         <span className="case-category">
           <Icon size={15} />
           <span>{gameCase.category}</span>
-        </span>
-        <span className={`difficulty-tag ${gameCase.difficulty.toLowerCase()}`}>
-          {gameCase.difficulty}
         </span>
       </div>
 
@@ -1514,8 +1465,8 @@ function CaseTile({
 
 function InvestigationView({
   activeCase,
-  answers,
-  setAnswers,
+  report,
+  setReport,
   selectedEvidence,
   setSelectedEvidence,
   timelineOrder,
@@ -1529,8 +1480,8 @@ function InvestigationView({
   goTo,
 }: {
   activeCase: InvestigationCase;
-  answers: AnswersState;
-  setAnswers: React.Dispatch<React.SetStateAction<AnswersState>>;
+  report: string;
+  setReport: (v: string) => void;
   selectedEvidence: number[];
   setSelectedEvidence: React.Dispatch<React.SetStateAction<number[]>>;
   timelineOrder: string[];
@@ -1543,15 +1494,14 @@ function InvestigationView({
   submissionBusy: boolean;
   goTo: (p: PageName) => void;
 }) {
-  const [activeTab, setActiveTab] = useState<'Evidence' | 'Suspects' | 'Questions'>('Evidence');
+  const [activeTab, setActiveTab] = useState<'Evidence' | 'Suspects'>('Evidence');
   const evidenceCollected = (id: number) => selectedEvidence.includes(id);
   const toggleEvidence = (id: number) => {
     setSelectedEvidence((current) =>
       current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]
     );
   };
-  const answeredCount = Object.keys(answers).filter((key) => key !== 'report').length;
-  const progress = Math.round((answeredCount / activeCase.questions.length) * 100);
+  const progress = Math.round((selectedEvidence.length / activeCase.evidence.length) * 100);
   const Icon = iconByName[activeCase.icon] || Fingerprint;
 
   return (
@@ -1573,10 +1523,7 @@ function InvestigationView({
 
       <div className="case-title-row">
         <div>
-          <div className="eyebrow">
-            {activeCase.difficulty.toUpperCase()} INVESTIGATION{' '}
-            <span className="eyebrow-divider">·</span> {activeCase.category.toUpperCase()}
-          </div>
+          <div className="eyebrow">{activeCase.category.toUpperCase()}</div>
           <h1>
             {activeCase.title}
             <span>:</span> {activeCase.subtitle}
@@ -1584,7 +1531,7 @@ function InvestigationView({
         </div>
         <div className="case-progress">
           <strong>{result ? '100%' : `${progress}%`}</strong>
-          <span>CASE PROGRESS</span>
+          <span>CLUES COLLECTED</span>
           <div className="progress-track">
             <i style={{ width: `${result ? 100 : progress}%` }} />
           </div>
@@ -1616,7 +1563,7 @@ function InvestigationView({
               </div>
 
               <div className="workspace-tabs" role="tablist">
-                {(['Evidence', 'Suspects', 'Questions'] as const).map((tab) => (
+                {(['Evidence', 'Suspects'] as const).map((tab) => (
                   <button
                     key={tab}
                     role="tab"
@@ -1625,9 +1572,11 @@ function InvestigationView({
                     onClick={() => setActiveTab(tab)}
                   >
                     <span>{tab}</span>
-                    {tab === 'Evidence' && <span className="tab-count">{activeCase.evidence.length}</span>}
-                    {tab === 'Questions' && (
-                      <span className="tab-count">{activeCase.questions.length}</span>
+                    {tab === 'Evidence' && (
+                      <span className="tab-count">{activeCase.evidence.length}</span>
+                    )}
+                    {tab === 'Suspects' && (
+                      <span className="tab-count">{activeCase.suspects.length}</span>
                     )}
                   </button>
                 ))}
@@ -1693,124 +1642,6 @@ function InvestigationView({
                 </div>
               )}
 
-              {activeTab === 'Questions' && (
-                <form className="question-list" onSubmit={submitCase}>
-                  {activeCase.questions.map((question, index) => (
-                    <fieldset
-                      className={`question-card question-${question.type}`}
-                      key={question.id}
-                    >
-                      <legend>
-                        <span className="question-num">Q{String(index + 1).padStart(2, '0')}</span>
-                        <span className="question-prompt">
-                          {question.prompt}
-                          <small>
-                            {question.type === 'true-false'
-                              ? 'TRUE OR FALSE'
-                              : question.type === 'clue'
-                              ? 'FIND THE CLUE'
-                              : question.type === 'match'
-                              ? 'MATCH REMEDIATION'
-                              : 'SELECT ONE'}
-                          </small>
-                        </span>
-                      </legend>
-
-                      {question.type === 'match' ? (
-                        <select
-                          className="question-match-select"
-                          aria-label={question.prompt}
-                          value={answers[question.id] ?? ''}
-                          onChange={(event) =>
-                            setAnswers((current) => ({
-                              ...current,
-                              [question.id]: Number(event.target.value),
-                            }))
-                          }
-                        >
-                          <option value="" disabled>
-                            Select a match
-                          </option>
-                          {question.options.map((option, optionIndex) => (
-                            <option value={optionIndex} key={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <div className="answer-options">
-                          {question.options.map((option, optionIndex) => (
-                            <label
-                              className={
-                                answers[question.id] === optionIndex ? 'answer-selected' : ''
-                              }
-                              key={option}
-                            >
-                              <input
-                                type="radio"
-                                name={question.id}
-                                checked={answers[question.id] === optionIndex}
-                                onChange={() =>
-                                  setAnswers((current) => ({
-                                    ...current,
-                                    [question.id]: optionIndex,
-                                  }))
-                                }
-                              />
-                              <span className="answer-letter">
-                                {question.type === 'true-false'
-                                  ? optionIndex
-                                    ? 'F'
-                                    : 'T'
-                                  : String.fromCharCode(65 + optionIndex)}
-                              </span>
-                              <span className="answer-text">{option}</span>
-                              <Check className="answer-check" size={14} />
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </fieldset>
-                  ))}
-
-                  <label className="report-field">
-                    <span>
-                      FINAL INVESTIGATION REPORT{' '}
-                      <small>
-                        {activeCase.difficulty === 'Hard'
-                          ? 'REQUIRED · 40+ CHARACTERS'
-                          : 'OPTIONAL · 500 CHARACTERS'}
-                      </small>
-                    </span>
-                    <textarea
-                      maxLength={500}
-                      value={answers.report || ''}
-                      onChange={(event) =>
-                        setAnswers((current) => ({ ...current, report: event.target.value }))
-                      }
-                      placeholder="Summarize your conclusion and cite the clues that support it."
-                    />
-                  </label>
-
-                  <button
-                    className="button button-primary submit-verdict"
-                    type="submit"
-                    disabled={
-                      submissionBusy ||
-                      answeredCount < activeCase.questions.length ||
-                      (activeCase.difficulty === 'Hard' &&
-                        (answers.report || '').trim().length < 40)
-                    }
-                  >
-                    {submissionBusy ? <span className="spinner" /> : <Flag size={16} />}
-                    <span>
-                      {submissionBusy ? 'Submitting to arena...' : 'Submit final verdict'}
-                    </span>
-                    <ArrowRight size={15} />
-                  </button>
-                </form>
-              )}
-
               <div className="workspace-bottom">
                 <div className="collected-summary">
                   <span className="locker-icon">
@@ -1849,6 +1680,32 @@ function InvestigationView({
                   <span>-5 PTS</span>
                 </div>
               )}
+
+              <form className="verdict-form" onSubmit={submitCase}>
+                <label className="report-field">
+                  <span>
+                    FINAL INVESTIGATION REPORT <small>OPTIONAL · 500 CHARACTERS</small>
+                  </span>
+                  <textarea
+                    maxLength={500}
+                    value={report}
+                    onChange={(event) => setReport(event.target.value)}
+                    placeholder="Summarize your team's findings and cite the clues supporting your timeline."
+                  />
+                </label>
+
+                <button
+                  className="button button-primary submit-verdict"
+                  type="submit"
+                  disabled={submissionBusy}
+                >
+                  {submissionBusy ? <span className="spinner" /> : <Flag size={16} />}
+                  <span>
+                    {submissionBusy ? 'Submitting to arena...' : 'Submit final verdict'}
+                  </span>
+                  <ArrowRight size={15} />
+                </button>
+              </form>
             </>
           )}
         </section>
@@ -1865,8 +1722,8 @@ function InvestigationView({
               </div>
               <div className="case-facts">
                 <div>
-                  <span>DIFFICULTY</span>
-                  <strong>{activeCase.difficulty}</strong>
+                  <span>EVIDENCE FILES</span>
+                  <strong>{activeCase.evidence.length} ITEMS</strong>
                 </div>
                 <div>
                   <span>TIME LIMIT</span>
@@ -1892,7 +1749,7 @@ function InvestigationView({
                 <Activity size={17} />
               </div>
               <p className="timeline-help">
-                Use the arrows to arrange events in chronological order (15 pts).
+                Use the arrows to arrange events in chronological order (60 pts).
               </p>
               <ol className="timeline-list">
                 {timelineOrder.map((event, index) => (
@@ -1974,25 +1831,20 @@ function ResultPanel({
       {result.explanations && result.explanations.length > 0 && (
         <div className="explanation-list">
           <h3>Case debrief</h3>
-          {result.explanations.map((item) => {
-            const prompt =
-              gameCase.questions.find((question) => question.id === item.question)?.prompt ||
-              item.question;
-            return (
-              <div
-                key={item.question}
-                className={`debrief-item ${item.correct ? 'is-correct' : 'is-wrong'}`}
-              >
-                <span className="debrief-icon">
-                  {item.correct ? <Check size={14} /> : <X size={14} />}
-                </span>
-                <div>
-                  <strong>{prompt}</strong>
-                  <p>{item.explanation}</p>
-                </div>
+          {result.explanations.map((item) => (
+            <div
+              key={item.question}
+              className={`debrief-item ${item.correct ? 'is-correct' : 'is-wrong'}`}
+            >
+              <span className="debrief-icon">
+                {item.correct ? <Check size={14} /> : <X size={14} />}
+              </span>
+              <div>
+                <strong>{item.question}</strong>
+                <p>{item.explanation}</p>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
 
@@ -2063,7 +1915,7 @@ function LeaderboardView({
                   {(team.teamName || '?').slice(0, 1).toUpperCase()}
                 </div>
                 <strong>{team.teamName || 'Team'}</strong>
-                <small>{team.difficulty || 'ARENA TEAM'}</small>
+                <small>ARENA TEAM</small>
                 <b>
                   {team.score || 0}
                   <small> PTS</small>
@@ -2095,7 +1947,6 @@ function LeaderboardView({
                 <tr>
                   <th>RANK</th>
                   <th>TEAM</th>
-                  <th>LAST DIFFICULTY</th>
                   <th>SCORE</th>
                   <th>TIME</th>
                 </tr>
@@ -2114,13 +1965,6 @@ function LeaderboardView({
                           {(team.teamName || '?').slice(0, 1).toUpperCase()}
                         </span>
                         {team.teamName || 'Team'}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className={`difficulty-tag ${(team.difficulty || 'easy').toLowerCase()}`}
-                      >
-                        {team.difficulty || '—'}
                       </span>
                     </td>
                     <td className="score-cell">
@@ -2212,12 +2056,10 @@ function AdminView({
   const [eventForm, setEventForm] = useState<{
     name: string;
     caseId: string;
-    difficulty: 'Easy' | 'Medium' | 'Hard';
     inviteCode: string;
   }>({
     name: '',
     caseId: cases[0].id,
-    difficulty: 'Easy',
     inviteCode: '',
   });
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
@@ -2256,7 +2098,7 @@ function AdminView({
     try {
       const result = await invokeArena<GameLobby>('adminCreateGame', eventForm);
       setNotice(`Event created with invitation code ${result.inviteCode}.`);
-      setEventForm({ name: '', caseId: cases[0].id, difficulty: 'Easy', inviteCode: '' });
+      setEventForm({ name: '', caseId: cases[0].id, inviteCode: '' });
       await reloadState();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Unable to create event.');
@@ -2380,46 +2222,16 @@ function AdminView({
               />
             </label>
             <label>
-              DIFFICULTY
-              <select
-                value={eventForm.difficulty}
-                onChange={(event) => {
-                  const diff = event.target.value as 'Easy' | 'Medium' | 'Hard';
-                  const selectedCase = cases.find((gameCase) => gameCase.difficulty === diff);
-                  setEventForm({
-                    ...eventForm,
-                    difficulty: diff,
-                    caseId: selectedCase?.id || eventForm.caseId,
-                  });
-                }}
-              >
-                {(['Easy', 'Medium', 'Hard'] as const).map((level) => (
-                  <option key={level} value={level}>
-                    {level}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
               INVESTIGATION
               <select
                 value={eventForm.caseId}
-                onChange={(event) => {
-                  const selectedCase = cases.find((gameCase) => gameCase.id === event.target.value);
-                  setEventForm({
-                    ...eventForm,
-                    caseId: event.target.value,
-                    difficulty: selectedCase?.difficulty || eventForm.difficulty,
-                  });
-                }}
+                onChange={(event) => setEventForm({ ...eventForm, caseId: event.target.value })}
               >
-                {cases
-                  .filter((gameCase) => gameCase.difficulty === eventForm.difficulty)
-                  .map((gameCase) => (
-                    <option value={gameCase.id} key={gameCase.id}>
-                      {gameCase.title}
-                    </option>
-                  ))}
+                {cases.map((gameCase) => (
+                  <option value={gameCase.id} key={gameCase.id}>
+                    {gameCase.title}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
@@ -2455,9 +2267,7 @@ function AdminView({
               <div className="admin-event-row" key={game.id}>
                 <div>
                   <strong>{game.name}</strong>
-                  <small>
-                    {game.inviteCode || 'No invite code'} · {game.difficulty}
-                  </small>
+                  <small>{game.inviteCode || 'No invite code'}</small>
                 </div>
                 <span className={`game-status ${game.status === 'live' ? 'is-live' : ''}`}>
                   {game.status}

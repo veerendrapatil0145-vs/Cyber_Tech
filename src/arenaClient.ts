@@ -12,8 +12,10 @@ export interface CaseScore {
   hintsUsed: number;
   elapsedSeconds: number;
   submittedAt: string;
-  correctCount?: number;
-  totalQuestions?: number;
+  timelineMatches?: number;
+  totalTimeline?: number;
+  keyCluesFound?: number;
+  totalKeyClues?: number;
   explanations?: Array<{
     question: string;
     correct: boolean;
@@ -30,7 +32,6 @@ export interface RankingEntry {
   ownerId: string;
   memberIds: string[];
   mode: 'Team';
-  difficulty: string;
   score: number;
   elapsedSeconds: number;
   caseScores: Record<string, CaseScore>;
@@ -41,7 +42,6 @@ export interface GameLobby {
   id: string;
   name: string;
   caseId: string;
-  difficulty: 'Easy' | 'Medium' | 'Hard';
   inviteCode: string;
   status: 'open' | 'live' | 'paused' | 'ended';
   participantCount: number;
@@ -72,7 +72,6 @@ export interface InvestigationSession {
   lastWriter: string;
   completed: boolean;
   progress: {
-    answers: Record<string, number>;
     report: string;
     selectedEvidence: number[];
     timelineOrder: string[];

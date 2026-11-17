@@ -22,8 +22,10 @@ interface CaseScoreRecord {
   hintsUsed: number;
   elapsedSeconds: number;
   submittedAt: string;
-  correctCount: number;
-  totalQuestions: number;
+  timelineMatches: number;
+  totalTimeline: number;
+  keyCluesFound: number;
+  totalKeyClues: number;
   explanations: Array<{
     question: string;
     correct: boolean;
@@ -38,7 +40,6 @@ interface RankingRecord {
   ownerId: string;
   memberIds: string[];
   mode: 'Team';
-  difficulty: string;
   score: number;
   elapsedSeconds: number;
   caseScores: Record<string, CaseScoreRecord>;
@@ -49,7 +50,6 @@ interface GameRecord {
   id: string;
   name: string;
   caseId: string;
-  difficulty: 'Easy' | 'Medium' | 'Hard';
   inviteCode: string;
   status: 'open' | 'live' | 'paused' | 'ended';
   participantCount: number;
@@ -65,7 +65,6 @@ interface AnnouncementRecord {
 }
 
 interface SessionProgress {
-  answers: Record<string, number>;
   report: string;
   selectedEvidence: number[];
   timelineOrder: string[];
@@ -193,7 +192,11 @@ function buildPublicState(db: ArenaDatabase, isAdmin: boolean) {
   };
 }
 
-function findTeamForPlayer(db: ArenaDatabase, playerId: string, teamId?: string | null): TeamRecord | undefined {
+function findTeamForPlayer(
+  db: ArenaDatabase,
+  playerId: string,
+  teamId?: string | null
+): TeamRecord | undefined {
   if (teamId) {
     return db.teams.find((team) => team.id === teamId && team.memberIds.includes(playerId));
   }
@@ -345,7 +348,8 @@ async function startServer() {
     }
 
     if (action === 'joinTeam') {
-      const code = typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
+      const code =
+        typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
       const targetTeam = db.teams.find((team) => team.inviteCode === code);
       if (!targetTeam) {
         res.status(404).json({ error: 'No team found with that invitation code.' });
@@ -412,7 +416,6 @@ async function startServer() {
           hintsUsed: 0,
           lastWriter: playerId,
           progress: {
-            answers: {},
             report: '',
             selectedEvidence: [],
             timelineOrder: [],
@@ -445,18 +448,7 @@ async function startServer() {
         return;
       }
 
-      const answersInput =
-        payload.answers && typeof payload.answers === 'object'
-          ? (payload.answers as Record<string, unknown>)
-          : {};
-      const cleanAnswers: Record<string, number> = {};
-      for (const [key, value] of Object.entries(answersInput)) {
-        if (key !== 'report' && typeof value === 'number' && Number.isInteger(value)) {
-          cleanAnswers[key] = value;
-        }
-      }
-      const report =
-        typeof answersInput.report === 'string' ? answersInput.report.slice(0, 500) : '';
+      const report = typeof payload.report === 'string' ? payload.report.slice(0, 500) : '';
       const selectedEvidence = Array.isArray(payload.selectedEvidence)
         ? payload.selectedEvidence.filter((item): item is number => typeof item === 'number')
         : [];
@@ -465,7 +457,6 @@ async function startServer() {
         : [];
 
       session.progress = {
-        answers: cleanAnswers,
         report,
         selectedEvidence,
         timelineOrder,
@@ -528,24 +519,12 @@ async function startServer() {
         return;
       }
 
-      const answersInput =
-        payload.answers && typeof payload.answers === 'object'
-          ? (payload.answers as Record<string, unknown>)
-          : {};
       const selectedEvidence = Array.isArray(payload.selectedEvidence)
         ? payload.selectedEvidence.filter((item): item is number => typeof item === 'number')
         : [];
       const timelineOrder = Array.isArray(payload.timelineOrder)
         ? payload.timelineOrder.filter((item): item is string => typeof item === 'string')
         : [];
-      const report = typeof payload.report === 'string' ? payload.report.trim() : '';
-
-      if (answerKey.difficulty === 'Hard' && report.length < 40) {
-        res.status(400).json({
-          error: 'Hard investigations require an investigation report of at least 40 characters.',
-        });
-        return;
-      }
 
       const session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
       const hintsUsed = session?.hintsUsed ?? 0;
@@ -553,46 +532,52 @@ async function startServer() {
         ? Math.max(1, Math.floor((Date.now() - session.startedAt) / 1000))
         : 60;
 
-      let correctCount = 0;
-      const explanations = answerKey.questions.map((questionKey) => {
-        const submitted = answersInput[questionKey.questionId];
-        const correct = submitted === questionKey.correctIndex;
-        if (correct) correctCount += 1;
-        return {
-          question: questionKey.questionId,
-          correct,
-          explanation: questionKey.explanation,
-        };
-      });
-
-      const questionPoints = (correctCount / answerKey.questions.length) * 75;
-
       let timelineMatches = 0;
       for (let i = 0; i < answerKey.correctTimeline.length; i += 1) {
         if (timelineOrder[i] === answerKey.correctTimeline[i]) {
           timelineMatches += 1;
         }
       }
-      const timelinePoints = (timelineMatches / answerKey.correctTimeline.length) * 15;
+      const timelinePoints = (timelineMatches / answerKey.correctTimeline.length) * 60;
 
       const keyHits = answerKey.keyEvidenceIndices.filter((idx) =>
         selectedEvidence.includes(idx)
       ).length;
       const evidencePoints =
         answerKey.keyEvidenceIndices.length > 0
-          ? (keyHits / answerKey.keyEvidenceIndices.length) * 10
-          : 10;
+          ? (keyHits / answerKey.keyEvidenceIndices.length) * 40
+          : 40;
 
-      const rawScore = Math.round(questionPoints + timelinePoints + evidencePoints - hintsUsed * 5);
+      const rawScore = Math.round(timelinePoints + evidencePoints - hintsUsed * 5);
       const finalScore = Math.max(0, Math.min(100, rawScore));
+
+      const explanations = [
+        {
+          question: 'Chronological timeline reconstruction',
+          correct: timelineMatches === answerKey.correctTimeline.length,
+          explanation: `${timelineMatches} of ${answerKey.correctTimeline.length} events placed in exact chronological order.`,
+        },
+        {
+          question: 'Critical forensic clues collected',
+          correct: keyHits === answerKey.keyEvidenceIndices.length,
+          explanation: `${keyHits} of ${answerKey.keyEvidenceIndices.length} primary clues locked into evidence.`,
+        },
+        ...answerKey.debriefNotes.map((note, idx) => ({
+          question: `Forensic finding 0${idx + 1}`,
+          correct: true,
+          explanation: note,
+        })),
+      ];
 
       const caseResult: CaseScoreRecord = {
         score: finalScore,
         hintsUsed,
         elapsedSeconds,
         submittedAt: new Date().toISOString(),
-        correctCount,
-        totalQuestions: answerKey.questions.length,
+        timelineMatches,
+        totalTimeline: answerKey.correctTimeline.length,
+        keyCluesFound: keyHits,
+        totalKeyClues: answerKey.keyEvidenceIndices.length,
         explanations,
       };
 
@@ -604,7 +589,6 @@ async function startServer() {
           ownerId: team.ownerId,
           memberIds: [...team.memberIds],
           mode: 'Team',
-          difficulty: answerKey.difficulty,
           score: finalScore,
           elapsedSeconds,
           caseScores: { [caseId]: caseResult },
@@ -621,7 +605,6 @@ async function startServer() {
           (sum, entry) => sum + entry.elapsedSeconds,
           0
         );
-        ranking.difficulty = answerKey.difficulty;
         ranking.memberIds = [...team.memberIds];
         ranking.updatedAt = new Date().toISOString();
       }
@@ -642,13 +625,14 @@ async function startServer() {
       res.json({
         ...caseResult,
         rank,
-        message: `Scored ${correctCount}/${answerKey.questions.length} questions, ${timelineMatches}/${answerKey.correctTimeline.length} timeline positions, and ${keyHits}/${answerKey.keyEvidenceIndices.length} key clues.`,
+        message: `Scored ${timelineMatches}/${answerKey.correctTimeline.length} timeline positions and ${keyHits}/${answerKey.keyEvidenceIndices.length} key clues.`,
       });
       return;
     }
 
     if (action === 'joinGame') {
-      const code = typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
+      const code =
+        typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
       const game = db.games.find((entry) => entry.inviteCode === code);
       if (!game) {
         res.status(404).json({ error: 'No event lobby matches that invitation code.' });
@@ -682,17 +666,17 @@ async function startServer() {
 
       if (action === 'adminCreateGame') {
         const name = typeof payload.name === 'string' ? payload.name.trim() : '';
-        const caseId = typeof payload.caseId === 'string' ? payload.caseId : 'case-01';
-        const difficulty =
-          payload.difficulty === 'Medium' || payload.difficulty === 'Hard'
-            ? payload.difficulty
-            : 'Easy';
+        const caseId = typeof payload.caseId === 'string' ? payload.caseId : 'shadow-trace';
         const rawCode =
           typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
         const inviteCode = rawCode || generateInviteCode(6);
 
         if (!name) {
           res.status(400).json({ error: 'Event name is required.' });
+          return;
+        }
+        if (!caseAnswerKeys[caseId]) {
+          res.status(400).json({ error: 'Selected case does not exist.' });
           return;
         }
         if (db.games.some((game) => game.inviteCode === inviteCode)) {
@@ -704,7 +688,6 @@ async function startServer() {
           id: `game_${crypto.randomUUID().slice(0, 8)}`,
           name,
           caseId,
-          difficulty,
           inviteCode,
           status: 'open',
           participantCount: 0,
