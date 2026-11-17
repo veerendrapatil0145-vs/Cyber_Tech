@@ -17,7 +17,7 @@ export interface CaseScore {
   keyCluesFound?: number;
   totalKeyClues?: number;
   explanations?: Array<{
-    question: string;
+    title: string;
     correct: boolean;
     explanation: string;
   }>;

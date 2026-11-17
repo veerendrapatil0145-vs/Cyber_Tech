@@ -14,7 +14,7 @@ export const caseAnswerKeys: Record<string, CaseAnswerKey> = {
       'Cron triggers /tmp/.cache-sync to stage /srv/lab/designs at 02:15 UTC',
       'WS-14 begins tunneling hex chunks via DNS queries at 02:19 UTC',
     ],
-    keyEvidenceIndices: [0, 1, 3],
+    keyEvidenceIndices: [],
     debriefNotes: [
       'Physical USB access three days earlier planted /tmp/.cache-sync and scheduled the hidden 02:15 UTC cron task.',
       'Because execution came from local cron persistence, zero overnight SSH logins appeared in auth logs.',
@@ -29,7 +29,7 @@ export const caseAnswerKeys: Record<string, CaseAnswerKey> = {
       'Validator retains retired reg-2023 in public JWKS without status enforcement',
       'Forged tokens signed with reg-2023 pass /api/verify at 03:42 UTC',
     ],
-    keyEvidenceIndices: [0, 1, 2],
+    keyEvidenceIndices: [],
     debriefNotes: [
       'The active HSM key (reg-2026) was never used overnight; all 18 forged tokens carried kid="reg-2023".',
       'Removing a private key in a later Git commit leaves the secret recoverable in prior Git commit objects.',

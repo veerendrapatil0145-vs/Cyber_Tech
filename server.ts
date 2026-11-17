@@ -27,7 +27,7 @@ interface CaseScoreRecord {
   keyCluesFound: number;
   totalKeyClues: number;
   explanations: Array<{
-    question: string;
+    title: string;
     correct: boolean;
     explanation: string;
   }>;
@@ -538,32 +538,37 @@ async function startServer() {
           timelineMatches += 1;
         }
       }
-      const timelinePoints = (timelineMatches / answerKey.correctTimeline.length) * 60;
+      const hasKeyEvidence = answerKey.keyEvidenceIndices.length > 0;
+      const timelinePoints =
+        (timelineMatches / answerKey.correctTimeline.length) * (hasKeyEvidence ? 60 : 100);
 
       const keyHits = answerKey.keyEvidenceIndices.filter((idx) =>
         selectedEvidence.includes(idx)
       ).length;
-      const evidencePoints =
-        answerKey.keyEvidenceIndices.length > 0
-          ? (keyHits / answerKey.keyEvidenceIndices.length) * 40
-          : 40;
+      const evidencePoints = hasKeyEvidence
+        ? (keyHits / answerKey.keyEvidenceIndices.length) * 40
+        : 0;
 
       const rawScore = Math.round(timelinePoints + evidencePoints - hintsUsed * 5);
       const finalScore = Math.max(0, Math.min(100, rawScore));
 
       const explanations = [
         {
-          question: 'Chronological timeline reconstruction',
+          title: 'Chronological timeline reconstruction',
           correct: timelineMatches === answerKey.correctTimeline.length,
           explanation: `${timelineMatches} of ${answerKey.correctTimeline.length} events placed in exact chronological order.`,
         },
-        {
-          question: 'Critical forensic clues collected',
-          correct: keyHits === answerKey.keyEvidenceIndices.length,
-          explanation: `${keyHits} of ${answerKey.keyEvidenceIndices.length} primary clues locked into evidence.`,
-        },
+        ...(hasKeyEvidence
+          ? [
+              {
+                title: 'Critical forensic clues collected',
+                correct: keyHits === answerKey.keyEvidenceIndices.length,
+                explanation: `${keyHits} of ${answerKey.keyEvidenceIndices.length} primary clues locked into evidence.`,
+              },
+            ]
+          : []),
         ...answerKey.debriefNotes.map((note, idx) => ({
-          question: `Forensic finding 0${idx + 1}`,
+          title: `Forensic finding 0${idx + 1}`,
           correct: true,
           explanation: note,
         })),

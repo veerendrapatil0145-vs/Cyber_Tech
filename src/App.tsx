@@ -1501,7 +1501,10 @@ function InvestigationView({
       current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]
     );
   };
-  const progress = Math.round((selectedEvidence.length / activeCase.evidence.length) * 100);
+  const progress =
+    activeCase.evidence.length > 0
+      ? Math.round((selectedEvidence.length / activeCase.evidence.length) * 100)
+      : 0;
   const Icon = iconByName[activeCase.icon] || Fingerprint;
 
   return (
@@ -1582,65 +1585,79 @@ function InvestigationView({
                 ))}
               </div>
 
-              {activeTab === 'Evidence' && (
-                <div className="evidence-grid">
-                  {activeCase.evidence.map((item, index) => {
-                    const picked = evidenceCollected(index);
-                    return (
-                      <button
-                        type="button"
-                        key={item.title}
-                        className={`evidence-card ${picked ? 'evidence-picked' : ''}`}
-                        onClick={() => toggleEvidence(index)}
-                      >
-                        <div className="evidence-meta">
-                          <span>{item.type}</span>
-                          <span className="evidence-index">
-                            E-{String(index + 1).padStart(2, '0')}
+              {activeTab === 'Evidence' &&
+                (activeCase.evidence.length > 0 ? (
+                  <div className="evidence-grid">
+                    {activeCase.evidence.map((item, index) => {
+                      const picked = evidenceCollected(index);
+                      return (
+                        <button
+                          type="button"
+                          key={item.title}
+                          className={`evidence-card ${picked ? 'evidence-picked' : ''}`}
+                          onClick={() => toggleEvidence(index)}
+                        >
+                          <div className="evidence-meta">
+                            <span>{item.type}</span>
+                            <span className="evidence-index">
+                              E-{String(index + 1).padStart(2, '0')}
+                            </span>
+                          </div>
+                          <strong>{item.title}</strong>
+                          <p>{item.detail}</p>
+                          <span className="evidence-action">
+                            {picked ? (
+                              <>
+                                <Check size={13} /> COLLECTED
+                              </>
+                            ) : (
+                              <>
+                                <Plus size={13} /> COLLECT CLUE
+                              </>
+                            )}
                           </span>
-                        </div>
-                        <strong>{item.title}</strong>
-                        <p>{item.detail}</p>
-                        <span className="evidence-action">
-                          {picked ? (
-                            <>
-                              <Check size={13} /> COLLECTED
-                            </>
-                          ) : (
-                            <>
-                              <Plus size={13} /> COLLECT CLUE
-                            </>
-                          )}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyState
+                    icon={FileText}
+                    title="No evidence added yet"
+                    copy="Evidence items for this case will appear here once added."
+                  />
+                ))}
 
-              {activeTab === 'Suspects' && (
-                <div className="suspect-grid">
-                  {activeCase.suspects.map((suspect, index) => (
-                    <article className="suspect-card" key={suspect.name}>
-                      <div className="suspect-avatar">
-                        {suspect.name
-                          .split(' ')
-                          .map((part) => part[0])
-                          .slice(0, 2)
-                          .join('')
-                          .toUpperCase()}
-                      </div>
-                      <span className="suspect-number">
-                        PERSON OF INTEREST · 0{index + 1}
-                      </span>
-                      <h3>{suspect.name}</h3>
-                      <small>{suspect.role}</small>
-                      <p>{suspect.note}</p>
-                      <span className="suspect-status">UNDER REVIEW</span>
-                    </article>
-                  ))}
-                </div>
-              )}
+              {activeTab === 'Suspects' &&
+                (activeCase.suspects.length > 0 ? (
+                  <div className="suspect-grid">
+                    {activeCase.suspects.map((suspect, index) => (
+                      <article className="suspect-card" key={suspect.name}>
+                        <div className="suspect-avatar">
+                          {suspect.name
+                            .split(' ')
+                            .map((part) => part[0])
+                            .slice(0, 2)
+                            .join('')
+                            .toUpperCase()}
+                        </div>
+                        <span className="suspect-number">
+                          PERSON OF INTEREST · 0{index + 1}
+                        </span>
+                        <h3>{suspect.name}</h3>
+                        <small>{suspect.role}</small>
+                        <p>{suspect.note}</p>
+                        <span className="suspect-status">UNDER REVIEW</span>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState
+                    icon={Users}
+                    title="No suspects listed yet"
+                    copy="Suspect profiles for this case will appear here once added."
+                  />
+                ))}
 
               <div className="workspace-bottom">
                 <div className="collected-summary">
@@ -1833,14 +1850,14 @@ function ResultPanel({
           <h3>Case debrief</h3>
           {result.explanations.map((item) => (
             <div
-              key={item.question}
+              key={item.title}
               className={`debrief-item ${item.correct ? 'is-correct' : 'is-wrong'}`}
             >
               <span className="debrief-icon">
                 {item.correct ? <Check size={14} /> : <X size={14} />}
               </span>
               <div>
-                <strong>{item.question}</strong>
+                <strong>{item.title}</strong>
                 <p>{item.explanation}</p>
               </div>
             </div>
