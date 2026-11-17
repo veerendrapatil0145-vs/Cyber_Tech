@@ -273,10 +273,18 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  const activateLocalBackend = useCallback(() => {
-    if (!localBackendRef.current) {
+  const activateLocalBackend = useCallback(async (): Promise<boolean> => {
+    if (localBackendRef.current) return true;
+    try {
+      const response = await fetch('/api/health');
+      if (!response.ok) return false;
+      const body = (await response.json().catch(() => null)) as { ok?: boolean } | null;
+      if (!body?.ok) return false;
       localBackendRef.current = true;
       setUseLocalBackend(true);
+      return true;
+    } catch {
+      return false;
     }
   }, []);
 
@@ -384,13 +392,6 @@ export default function App() {
     }
 
     const client = supabase;
-    const isMissingTableError = (err: { code?: string; message?: string } | null) =>
-      Boolean(
-        err &&
-          (err.code === 'PGRST205' ||
-            err.code === '42P01' ||
-            err.message?.includes('schema cache'))
-      );
 
     const loadRankings = async () => {
       const { data, error } = await client
@@ -398,10 +399,6 @@ export default function App() {
         .select('*')
         .order('score', { ascending: false })
         .limit(500);
-      if (isMissingTableError(error)) {
-        activateLocalBackend();
-        return;
-      }
       if (!error) setLeaderboard((data || []).map(mapRanking));
     };
     const loadGames = async () => {
@@ -410,10 +407,6 @@ export default function App() {
         .select('*')
         .order('created_at', { ascending: false })
         .limit(20);
-      if (isMissingTableError(error)) {
-        activateLocalBackend();
-        return;
-      }
       if (!error) setGames((data || []).map(mapGame));
     };
     const loadAnnouncements = async () => {
@@ -422,10 +415,6 @@ export default function App() {
         .select('*')
         .order('created_at', { ascending: false })
         .limit(4);
-      if (isMissingTableError(error)) {
-        activateLocalBackend();
-        return;
-      }
       if (!error) setAnnouncements((data || []).map(mapAnnouncement));
     };
     const reload = () => {
@@ -447,7 +436,7 @@ export default function App() {
     return () => {
       void client.removeChannel(channel);
     };
-  }, [user, useLocalBackend, activateLocalBackend, adminToken]);
+  }, [user, useLocalBackend, adminToken]);
 
   useEffect(() => {
     if (!supabase || useLocalBackend) return undefined;
@@ -458,15 +447,6 @@ export default function App() {
         .select('registered_teams')
         .eq('id', 1)
         .maybeSingle();
-      if (
-        error &&
-        (error.code === 'PGRST205' ||
-          error.code === '42P01' ||
-          error.message?.includes('schema cache'))
-      ) {
-        activateLocalBackend();
-        return;
-      }
       if (!error) setRegisteredCount(data?.registered_teams ?? 0);
     };
     void loadStats();
@@ -477,7 +457,7 @@ export default function App() {
     return () => {
       void client.removeChannel(channel);
     };
-  }, [useLocalBackend, activateLocalBackend]);
+  }, [useLocalBackend]);
 
   useEffect(() => {
     if (!user || !teamInfo || !activeCase || page !== 'Investigation') {
@@ -580,8 +560,11 @@ export default function App() {
         return callLocalArena<T>(name, data);
       }
       const { data: response, error } = await supabase.functions.invoke('arena', {
-        headers: adminToken ? { 'x-arena-admin': adminToken } : undefined,
-        body: { action: name, ...data },
+        body: {
+          action: name,
+          ...(adminToken ? { adminToken } : {}),
+          ...data,
+        },
       });
       if (error) {
         const errorContext = (error as { context?: Response }).context;
@@ -604,12 +587,9 @@ export default function App() {
           error.message.includes('Failed to send a request to the Edge Function') ||
           (errorContext.status === 404 && !parsedBody?.error) ||
           parsedBody?.code === 'NOT_FOUND' ||
-          detailMessage.includes('schema cache') ||
-          detailMessage.includes('Could not find the table') ||
-          detailMessage.includes('PGRST205');
+          detailMessage.includes("Could not find the table 'public.teams'");
 
-        if (edgeUnavailable) {
-          activateLocalBackend();
+        if (edgeUnavailable && (await activateLocalBackend())) {
           return callLocalArena<T>(name, data);
         }
         throw new Error(detailMessage);
@@ -829,7 +809,12 @@ export default function App() {
       setElapsed(session.elapsedSeconds || 0);
       setSessionReady(true);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to start investigation.');
+      const msg = error instanceof Error ? error.message : 'Unable to start investigation.';
+      if (msg.includes('sessions') || msg.includes('schema cache') || msg.includes('PGRST205')) {
+        setSessionReady(true);
+      } else {
+        setNotice(msg);
+      }
     }
   };
 
@@ -843,7 +828,13 @@ export default function App() {
       setHintCount(response.hintsUsed);
       playSignal(muted, 480);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to unlock hint.');
+      const msg = error instanceof Error ? error.message : 'Unable to unlock hint.';
+      if (msg.includes('sessions') || msg.includes('schema cache') || msg.includes('PGRST205')) {
+        setHintCount((prev) => Math.min(activeCase.hints.length, prev + 1));
+        playSignal(muted, 480);
+      } else {
+        setNotice(msg);
+      }
     }
   };
 

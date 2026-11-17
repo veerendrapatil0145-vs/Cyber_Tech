@@ -157,7 +157,12 @@ function getPlayerId(req: Request): string {
 }
 
 function isAdminRequest(req: Request): boolean {
-  const token = req.header('x-arena-admin')?.trim() || '';
+  const headerToken = req.header('x-arena-admin')?.trim() || '';
+  const bodyToken =
+    req.body && typeof (req.body as { adminToken?: unknown }).adminToken === 'string'
+      ? (req.body as { adminToken: string }).adminToken.trim()
+      : '';
+  const token = headerToken || bodyToken;
   return Boolean(token && activeAdminTokens.has(token));
 }
 

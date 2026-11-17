@@ -1,4 +1,4 @@
--- Cyber Mystery Arena schema for Supabase project: erfbsolezxmdunjjthgq
+-- Cyber Mystery Arena schema & migration for Supabase project: erfbsolezxmdunjjthgq
 -- Run this in your Supabase Dashboard -> SQL Editor.
 
 create extension if not exists pgcrypto;
@@ -7,16 +7,23 @@ create table if not exists public.teams (
   id uuid primary key default gen_random_uuid(),
   name text unique not null,
   invite_code text unique not null,
-  owner_id uuid not null,
+  owner_id uuid,
   member_ids uuid[] not null default '{}',
   created_at timestamptz not null default now()
 );
 
+alter table public.teams
+  add column if not exists name text,
+  add column if not exists invite_code text,
+  add column if not exists owner_id uuid,
+  add column if not exists member_ids uuid[] not null default '{}',
+  add column if not exists created_at timestamptz not null default now();
+
 create table if not exists public.rankings (
   id uuid primary key default gen_random_uuid(),
-  team_id uuid unique not null references public.teams(id) on delete cascade,
-  team_name text not null,
-  owner_id uuid not null,
+  team_id uuid unique not null,
+  team_name text not null default 'Team',
+  owner_id uuid,
   member_ids uuid[] not null default '{}',
   mode text not null default 'Team',
   score integer not null default 0,
@@ -25,16 +32,38 @@ create table if not exists public.rankings (
   updated_at timestamptz not null default now()
 );
 
+alter table public.rankings
+  add column if not exists team_id uuid,
+  add column if not exists team_name text not null default 'Team',
+  add column if not exists owner_id uuid,
+  add column if not exists member_ids uuid[] not null default '{}',
+  add column if not exists mode text not null default 'Team',
+  add column if not exists score integer not null default 0,
+  add column if not exists elapsed_seconds integer not null default 0,
+  add column if not exists case_scores jsonb not null default '{}'::jsonb,
+  add column if not exists updated_at timestamptz not null default now();
+
+create unique index if not exists rankings_team_id_uidx on public.rankings (team_id);
+
 create table if not exists public.games (
   id uuid primary key default gen_random_uuid(),
-  name text not null,
-  case_id text not null,
+  name text not null default 'Arena Event',
+  case_id text not null default 'shadow-trace',
   invite_code text unique not null,
   status text not null default 'open',
   participant_count integer not null default 0,
   participant_team_ids uuid[] not null default '{}',
   created_at timestamptz not null default now()
 );
+
+alter table public.games
+  add column if not exists name text not null default 'Arena Event',
+  add column if not exists case_id text not null default 'shadow-trace',
+  add column if not exists invite_code text,
+  add column if not exists status text not null default 'open',
+  add column if not exists participant_count integer not null default 0,
+  add column if not exists participant_team_ids uuid[] not null default '{}',
+  add column if not exists created_at timestamptz not null default now();
 
 create table if not exists public.announcements (
   id uuid primary key default gen_random_uuid(),
@@ -54,7 +83,7 @@ on conflict (id) do nothing;
 
 create table if not exists public.sessions (
   id uuid primary key default gen_random_uuid(),
-  team_id uuid not null references public.teams(id) on delete cascade,
+  team_id uuid not null,
   case_id text not null,
   started_at timestamptz not null default now(),
   hints_used integer not null default 0,
@@ -94,8 +123,8 @@ create policy "Team members read sessions" on public.sessions
   for select to authenticated using (
     exists (
       select 1 from public.teams t
-      where t.id = sessions.team_id
-        and auth.uid() = any(t.member_ids)
+      where t.id::text = sessions.team_id::text
+        and auth.uid()::text = any(t.member_ids::text[])
     )
   );
 

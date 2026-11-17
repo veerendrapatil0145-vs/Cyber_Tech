@@ -412,7 +412,7 @@ Deno.serve(async (req) => {
     }
 
     const tokenAdmin = await verifyAdminToken(
-      req.headers.get('x-arena-admin') || '',
+      req.headers.get('x-arena-admin') || String(payload.adminToken || ''),
       serviceRoleKey
     );
     const isAdmin = Boolean(
