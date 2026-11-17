@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
@@ -22,7 +22,6 @@ import {
   LayoutDashboard,
   Lightbulb,
   LockKeyhole,
-  LogOut,
   Mail,
   Menu,
   Moon,
@@ -42,21 +41,9 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
 import { cases, type InvestigationCase } from './cases';
-import {
-  fetchArenaState,
-  fetchSession,
-  getOrCreatePlayerId,
-  getStoredAdminToken,
-  invokeArena,
-  setStoredAdminToken,
-  subscribeArenaStream,
-  type Announcement,
-  type CaseScore,
-  type GameLobby,
-  type RankingEntry,
-  type TeamInfo,
-} from './arenaClient';
+import { isAdminUser, supabase, supabaseConfigured } from './supabase.js';
 
 type PageName =
   | 'Home'
@@ -67,12 +54,57 @@ type PageName =
   | 'Investigation'
   | 'Admin';
 
-interface AdminTeamSummary {
+interface TeamInfo {
   id: string;
   name: string;
   inviteCode: string;
+}
+
+interface CaseScore {
+  score: number;
+  hintsUsed?: number;
+  elapsedSeconds?: number;
+  rank?: number;
+  message?: string;
+  explanations?: Array<{
+    title?: string;
+    correct?: boolean;
+    explanation: string;
+  }>;
+}
+
+interface RankingEntry {
+  id: string;
+  teamName?: string;
+  memberIds?: string[];
+  ownerId?: string;
+  mode?: string;
+  score?: number;
+  elapsedSeconds?: number;
+  caseScores?: Record<string, CaseScore>;
+}
+
+interface GameLobby {
+  id: string;
+  name: string;
+  inviteCode?: string;
+  participantCount?: number;
+  caseId?: string;
+  status?: string;
+  createdAt?: string;
+}
+
+interface AnnouncementItem {
+  id: string;
+  title: string;
+  message: string;
+  createdAt?: string | { toDate?: () => Date };
+}
+
+interface AdminTeamSummary {
+  id: string;
+  name: string;
   memberCount: number;
-  createdAt: string;
 }
 
 const navigation: Array<{
@@ -130,10 +162,57 @@ function playSignal(muted: boolean, frequency = 620) {
   };
 }
 
+const mapRanking = (row: Record<string, unknown>): RankingEntry => ({
+  ...(row as unknown as RankingEntry),
+  teamName: (row.team_name as string) ?? (row.teamName as string),
+  memberIds: (row.member_ids as string[]) ?? (row.memberIds as string[]),
+  ownerId: (row.owner_id as string) ?? (row.ownerId as string),
+  elapsedSeconds: (row.elapsed_seconds as number) ?? (row.elapsedSeconds as number),
+  caseScores: (row.case_scores as Record<string, CaseScore>) ?? (row.caseScores as Record<string, CaseScore>),
+});
+
+const mapGame = (row: Record<string, unknown>): GameLobby => ({
+  ...(row as unknown as GameLobby),
+  inviteCode: (row.invite_code as string) ?? (row.inviteCode as string),
+  participantCount: (row.participant_count as number) ?? (row.participantCount as number),
+  caseId: (row.case_id as string) ?? (row.caseId as string),
+  createdAt: (row.created_at as string) ?? (row.createdAt as string),
+});
+
+const mapAnnouncement = (row: Record<string, unknown>): AnnouncementItem => ({
+  ...(row as unknown as AnnouncementItem),
+  createdAt: (row.created_at as string) ?? (row.createdAt as string),
+});
+
+const mapSession = (row: Record<string, unknown>) => ({
+  ...row,
+  hintsUsed: (row.hints_used as number) ?? (row.hintsUsed as number),
+  lastWriter: (row.last_writer as string) ?? (row.lastWriter as string),
+  progress: row.progress as
+    | {
+        report?: string;
+        selectedEvidence?: number[];
+        timelineOrder?: string[];
+      }
+    | undefined,
+});
+
+function formatAnnouncementDate(createdAt?: string | { toDate?: () => Date }): string {
+  if (!createdAt) return 'ARENA NOTICE';
+  if (typeof createdAt === 'string') {
+    const parsed = new Date(createdAt);
+    return Number.isNaN(parsed.getTime()) ? 'ARENA NOTICE' : parsed.toLocaleDateString();
+  }
+  return createdAt.toDate?.().toLocaleDateString() || 'ARENA NOTICE';
+}
+
 export default function App() {
-  const playerId = useMemo(() => getOrCreatePlayerId(), []);
   const [page, setPage] = useState<PageName>('Home');
-  const [admin, setAdmin] = useState<boolean>(() => Boolean(getStoredAdminToken()));
+  const [user, setUser] = useState<User | null>(null);
+  const [admin, setAdmin] = useState(false);
+  const [authReady, setAuthReady] = useState(!supabaseConfigured);
+  const [useLocalBackend, setUseLocalBackend] = useState(!supabaseConfigured);
+  const localBackendRef = useRef(!supabaseConfigured);
   const [activeCase, setActiveCase] = useState<InvestigationCase | null>(null);
   const [report, setReport] = useState('');
   const [selectedEvidence, setSelectedEvidence] = useState<number[]>([]);
@@ -146,10 +225,10 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [teamEntryError, setTeamEntryError] = useState('');
   const [teamBusy, setTeamBusy] = useState(false);
-  const [teamLoading, setTeamLoading] = useState(true);
+  const [teamLoading, setTeamLoading] = useState(false);
   const [leaderboard, setLeaderboard] = useState<RankingEntry[]>([]);
   const [games, setGames] = useState<GameLobby[]>([]);
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [registeredCount, setRegisteredCount] = useState<number | null>(null);
   const [teamName, setTeamName] = useState('');
   const [teamCode, setTeamCode] = useState('');
@@ -161,71 +240,245 @@ export default function App() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  const loadArenaState = useCallback(async () => {
-    try {
-      const state = await fetchArenaState();
-      setLeaderboard(state.rankings || []);
-      setGames(state.games || []);
-      setAnnouncements(state.announcements || []);
-      setRegisteredCount(state.stats?.registered_teams ?? 0);
-      setAdmin(Boolean(state.isAdmin));
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Failed to load arena state.');
+  useEffect(() => {
+    if (!supabase) {
+      setTeamEntryError('Supabase is not configured. Add your project URL and publishable key to .env.local.');
+      return undefined;
+    }
+    const client = supabase;
+    let creatingAnonymousSession = false;
+    const {
+      data: { subscription },
+    } = client.auth.onAuthStateChange((event, session) => {
+      const currentUser = session?.user || null;
+      setUser(currentUser);
+      setAdmin(isAdminUser(currentUser));
+      setAuthReady(true);
+      if (event === 'INITIAL_SESSION' && !currentUser && !creatingAnonymousSession) {
+        creatingAnonymousSession = true;
+        window.setTimeout(() => {
+          client.auth
+            .signInAnonymously()
+            .then(({ error }) => {
+              if (error) setTeamEntryError(error.message);
+            })
+            .catch((error: unknown) =>
+              setTeamEntryError(error instanceof Error ? error.message : 'Anonymous sign-in failed.')
+            );
+        }, 0);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const activateLocalBackend = useCallback(() => {
+    if (!localBackendRef.current) {
+      localBackendRef.current = true;
+      setUseLocalBackend(true);
     }
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    setTeamLoading(true);
-    setTeamEntryError('');
-
-    Promise.all([invokeArena<{ teams: TeamInfo[] }>('listMyTeams'), fetchArenaState()])
-      .then(([teamRes, stateRes]) => {
-        if (!active) return;
-        setTeamInfo(teamRes.teams?.[0] || null);
-        setLeaderboard(stateRes.rankings || []);
-        setGames(stateRes.games || []);
-        setAnnouncements(stateRes.announcements || []);
-        setRegisteredCount(stateRes.stats?.registered_teams ?? 0);
-        setAdmin(Boolean(stateRes.isAdmin));
-      })
-      .catch((error) => {
-        if (active) {
-          setTeamEntryError(
-            error instanceof Error ? error.message : 'Unable to connect to the arena server.'
-          );
-        }
-      })
-      .finally(() => {
-        if (active) setTeamLoading(false);
+  const callLocalArena = useCallback(
+    async <T = Record<string, unknown>>(
+      action: string,
+      data: Record<string, unknown> = {},
+      playerIdOverride?: string
+    ): Promise<T> => {
+      const playerId = playerIdOverride || user?.id || '';
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (playerId) {
+        headers['x-arena-player'] = playerId;
+      }
+      const response = await fetch('/api/arena', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action, ...data }),
       });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+      const body = (await response.json().catch(() => ({}))) as { error?: string } & T;
+      if (!response.ok) {
+        throw new Error(body.error || `Request failed (${response.status})`);
+      }
+      return body;
+    },
+    [user?.id]
+  );
 
   useEffect(() => {
-    const unsubscribe = subscribeArenaStream({
-      onState: (state) => {
-        setLeaderboard(state.rankings || []);
-        setGames(state.games || []);
-        setAnnouncements(state.announcements || []);
-        setRegisteredCount(state.stats?.registered_teams ?? 0);
-      },
-      onSession: (payload) => {
-        if (
-          !teamInfo ||
-          !activeCase ||
-          page !== 'Investigation' ||
-          payload.teamId !== teamInfo.id ||
-          payload.caseId !== activeCase.id ||
-          payload.lastWriter === playerId
-        ) {
-          return;
+    if (!user) return undefined;
+    if (!supabase || useLocalBackend) {
+      let active = true;
+      const applyState = (payload: {
+        rankings?: Record<string, unknown>[];
+        games?: Record<string, unknown>[];
+        announcements?: Record<string, unknown>[];
+        stats?: { registered_teams?: number };
+      }) => {
+        if (!active) return;
+        setLeaderboard((payload.rankings || []).map(mapRanking));
+        setGames((payload.games || []).map(mapGame));
+        setAnnouncements((payload.announcements || []).map(mapAnnouncement));
+        if (typeof payload.stats?.registered_teams === 'number') {
+          setRegisteredCount(payload.stats.registered_teams);
         }
-        void fetchSession(teamInfo.id, activeCase.id).then((session) => {
-          if (!session?.progress) return;
+      };
+
+      const loadLocalState = async () => {
+        try {
+          const response = await fetch('/api/state', {
+            headers: { 'x-arena-player': user.id },
+          });
+          if (!response.ok) return;
+          const payload = (await response.json()) as {
+            rankings?: Record<string, unknown>[];
+            games?: Record<string, unknown>[];
+            announcements?: Record<string, unknown>[];
+            stats?: { registered_teams?: number };
+          };
+          applyState(payload);
+        } catch {
+          // Keep existing state if offline.
+        }
+      };
+
+      void loadLocalState();
+      if (typeof EventSource === 'undefined') return undefined;
+      const source = new EventSource('/api/stream');
+      source.addEventListener('state', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent<string>).data) as {
+            rankings?: Record<string, unknown>[];
+            games?: Record<string, unknown>[];
+            announcements?: Record<string, unknown>[];
+            stats?: { registered_teams?: number };
+          };
+          applyState(payload);
+        } catch {
+          // Ignore malformed stream events.
+        }
+      });
+      return () => {
+        active = false;
+        source.close();
+      };
+    }
+
+    const client = supabase;
+    const isMissingTableError = (err: { code?: string; message?: string } | null) =>
+      Boolean(
+        err &&
+          (err.code === 'PGRST205' ||
+            err.code === '42P01' ||
+            err.message?.includes('schema cache'))
+      );
+
+    const loadRankings = async () => {
+      const { data, error } = await client
+        .from('rankings')
+        .select('*')
+        .order('score', { ascending: false })
+        .limit(500);
+      if (isMissingTableError(error)) {
+        activateLocalBackend();
+        return;
+      }
+      if (!error) setLeaderboard((data || []).map(mapRanking));
+    };
+    const loadGames = async () => {
+      const { data, error } = await client
+        .from('games')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (isMissingTableError(error)) {
+        activateLocalBackend();
+        return;
+      }
+      if (!error) setGames((data || []).map(mapGame));
+    };
+    const loadAnnouncements = async () => {
+      const { data, error } = await client
+        .from('announcements')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(4);
+      if (isMissingTableError(error)) {
+        activateLocalBackend();
+        return;
+      }
+      if (!error) setAnnouncements((data || []).map(mapAnnouncement));
+    };
+    const reload = () => {
+      void loadRankings();
+      void loadGames();
+      void loadAnnouncements();
+    };
+    reload();
+    const channel = client
+      .channel('arena-data')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rankings' }, loadRankings)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'games' }, loadGames)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'announcements' },
+        loadAnnouncements
+      )
+      .subscribe();
+    return () => {
+      void client.removeChannel(channel);
+    };
+  }, [user, useLocalBackend, activateLocalBackend]);
+
+  useEffect(() => {
+    if (!supabase || useLocalBackend) return undefined;
+    const client = supabase;
+    const loadStats = async () => {
+      const { data, error } = await client
+        .from('stats')
+        .select('registered_teams')
+        .eq('id', 1)
+        .maybeSingle();
+      if (
+        error &&
+        (error.code === 'PGRST205' ||
+          error.code === '42P01' ||
+          error.message?.includes('schema cache'))
+      ) {
+        activateLocalBackend();
+        return;
+      }
+      if (!error) setRegisteredCount(data?.registered_teams ?? 0);
+    };
+    void loadStats();
+    const channel = client
+      .channel('arena-stats')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stats' }, loadStats)
+      .subscribe();
+    return () => {
+      void client.removeChannel(channel);
+    };
+  }, [useLocalBackend, activateLocalBackend]);
+
+  useEffect(() => {
+    if (!user || !teamInfo || !activeCase || page !== 'Investigation') {
+      return undefined;
+    }
+
+    if (!supabase || useLocalBackend) {
+      let active = true;
+      const loadLocalSession = async () => {
+        try {
+          const params = new URLSearchParams({ teamId: teamInfo.id, caseId: activeCase.id });
+          const response = await fetch(`/api/session?${params.toString()}`, {
+            headers: { 'x-arena-player': user.id },
+          });
+          if (!response.ok) return;
+          const payload = (await response.json()) as {
+            session?: Record<string, unknown> | null;
+          };
+          const session = payload.session && mapSession(payload.session);
+          if (!active || !session?.progress || session.lastWriter === user.id) return;
           if (typeof session.progress.report === 'string') {
             setReport(session.progress.report);
           }
@@ -234,14 +487,162 @@ export default function App() {
             setTimelineOrder(session.progress.timelineOrder);
           }
           setHintCount(session.hintsUsed || 0);
-        });
-      },
-    });
-    return unsubscribe;
-  }, [teamInfo, activeCase, page, playerId]);
+        } catch {
+          // Ignore transient network errors.
+        }
+      };
+
+      void loadLocalSession();
+      if (typeof EventSource === 'undefined') return undefined;
+      const source = new EventSource('/api/stream');
+      source.addEventListener('session', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent<string>).data) as {
+            teamId?: string;
+            caseId?: string;
+            lastWriter?: string;
+          };
+          if (
+            payload.teamId === teamInfo.id &&
+            payload.caseId === activeCase.id &&
+            payload.lastWriter !== user.id
+          ) {
+            void loadLocalSession();
+          }
+        } catch {
+          // Ignore malformed stream payload.
+        }
+      });
+      return () => {
+        active = false;
+        source.close();
+      };
+    }
+
+    const client = supabase;
+    const loadSession = async () => {
+      const { data, error } = await client
+        .from('sessions')
+        .select('*')
+        .eq('team_id', teamInfo.id)
+        .eq('case_id', activeCase.id)
+        .maybeSingle();
+      const session = data && mapSession(data as Record<string, unknown>);
+      if (error || !session?.progress || session.lastWriter === user.id) return;
+      if (typeof session.progress.report === 'string') {
+        setReport(session.progress.report);
+      }
+      setSelectedEvidence(session.progress.selectedEvidence || []);
+      if (session.progress.timelineOrder?.length) {
+        setTimelineOrder(session.progress.timelineOrder);
+      }
+      setHintCount(session.hintsUsed || 0);
+    };
+    void loadSession();
+    const channel = client
+      .channel(`session:${teamInfo.id}:${activeCase.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'sessions', filter: `team_id=eq.${teamInfo.id}` },
+        loadSession
+      )
+      .subscribe();
+    return () => {
+      void client.removeChannel(channel);
+    };
+  }, [user, teamInfo, activeCase, page, useLocalBackend]);
+
+  const invoke = useCallback(
+    async <T = Record<string, unknown>>(
+      name: string,
+      data: Record<string, unknown> = {}
+    ): Promise<T> => {
+      if (!supabase || localBackendRef.current) {
+        return callLocalArena<T>(name, data);
+      }
+      const { data: response, error } = await supabase.functions.invoke('arena', {
+        body: { action: name, ...data },
+      });
+      if (error) {
+        const errorContext = (error as { context?: Response }).context;
+        let parsedBody: { error?: string; code?: string; message?: string } | null = null;
+        if (errorContext) {
+          try {
+            parsedBody = (await errorContext.clone().json()) as {
+              error?: string;
+              code?: string;
+              message?: string;
+            };
+          } catch {
+            parsedBody = null;
+          }
+        }
+        const edgeUnavailable =
+          !errorContext ||
+          error.name === 'FunctionsFetchError' ||
+          error.message.includes('Failed to send a request to the Edge Function') ||
+          (errorContext.status === 404 && !parsedBody?.error) ||
+          parsedBody?.code === 'NOT_FOUND';
+
+        if (edgeUnavailable) {
+          activateLocalBackend();
+          return callLocalArena<T>(name, data);
+        }
+        throw new Error(parsedBody?.error || parsedBody?.message || error.message);
+      }
+      return response as T;
+    },
+    [activateLocalBackend, callLocalArena]
+  );
 
   useEffect(() => {
-    if (!activeCase || !sessionReady || result) return undefined;
+    if (!user) {
+      setTeamInfo(null);
+      setTeamLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setTeamLoading(true);
+    setTeamEntryError('');
+    invoke<{ teams?: TeamInfo[] }>('listMyTeams')
+      .then((data) => {
+        if (active) setTeamInfo(data?.teams?.[0] || null);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setTeamEntryError(error instanceof Error ? error.message : 'Unable to load team.');
+        }
+      })
+      .finally(() => {
+        if (active) setTeamLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user, invoke]);
+
+  useEffect(() => {
+    if (!supabase || useLocalBackend || !user || !teamInfo) return undefined;
+    const client = supabase;
+    const channel = client.channel(`presence:${teamInfo.id}`, {
+      config: { private: true, presence: { key: user.id } },
+    });
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        void channel.track({
+          userId: user.id,
+          state: 'online',
+          onlineAt: new Date().toISOString(),
+        });
+      }
+    });
+    return () => {
+      void client.removeChannel(channel);
+    };
+  }, [user, teamInfo, useLocalBackend]);
+
+  useEffect(() => {
+    if (!activeCase) return undefined;
     const progress = {
       caseId: activeCase.id,
       report,
@@ -250,8 +651,9 @@ export default function App() {
       hintCount,
     };
     localStorage.setItem('arena-progress', JSON.stringify(progress));
+    if (!sessionReady || !user || result) return undefined;
     const timeout = window.setTimeout(() => {
-      void invokeArena('saveInvestigationProgress', {
+      void invoke('saveInvestigationProgress', {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
         report,
@@ -260,7 +662,7 @@ export default function App() {
       }).catch(() => {});
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, teamInfo, result]);
+  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, user, teamInfo, result, invoke]);
 
   useEffect(() => {
     if (!activeCase || result) return undefined;
@@ -278,12 +680,13 @@ export default function App() {
   }, [muted]);
 
   const completed = useMemo(() => {
+    const localCompleted = stored<string[]>('arena-completed', []);
     const teamRanking = leaderboard.find(
-      (entry) => entry.teamId === teamInfo?.id || entry.memberIds?.includes(playerId)
+      (score) => score.mode === 'Team' && (user?.id ? score.memberIds?.includes(user.id) : false)
     );
     const serverClosed = teamRanking ? Object.keys(teamRanking.caseScores || {}) : [];
-    return [...new Set(serverClosed)];
-  }, [leaderboard, teamInfo, playerId]);
+    return [...new Set([...localCompleted, ...serverClosed])];
+  }, [leaderboard, user, result]);
 
   const filteredScores = useMemo(
     () =>
@@ -297,9 +700,7 @@ export default function App() {
 
   const teamScore =
     leaderboard.find(
-      (score) =>
-        score.mode === 'Team' &&
-        (score.teamId === teamInfo?.id || score.memberIds?.includes(playerId))
+      (score) => score.mode === 'Team' && (user?.id ? score.memberIds?.includes(user.id) : false)
     )?.score ?? 0;
 
   const myRank =
@@ -307,15 +708,15 @@ export default function App() {
       .filter((score) => score.mode === 'Team')
       .findIndex(
         (score) =>
-          score.teamId === teamInfo?.id ||
-          score.ownerId === playerId ||
-          score.memberIds?.includes(playerId)
+          user?.id && (score.ownerId === user.id || score.memberIds?.includes(user.id))
       ) + 1;
 
   const secondsRemaining = Math.max(0, (activeCase?.duration || 0) * 60 - elapsed);
   const timer = `${String(Math.floor(secondsRemaining / 60)).padStart(2, '0')}:${String(
     secondsRemaining % 60
   ).padStart(2, '0')}`;
+
+
 
   const openCase = async (gameCase: InvestigationCase) => {
     if (!teamInfo) {
@@ -325,25 +726,18 @@ export default function App() {
     const previousScore = leaderboard.find(
       (score) =>
         Object.hasOwn(score.caseScores || {}, gameCase.id) &&
-        (score.teamId === teamInfo.id || score.memberIds?.includes(playerId))
+        (user?.id ? score.memberIds?.includes(user.id) : false)
     );
     if (previousScore) {
-      const closedResult = previousScore.caseScores[gameCase.id];
-      const rankIdx =
-        leaderboard
-          .filter((entry) => entry.mode === 'Team')
-          .findIndex((entry) => entry.teamId === previousScore.teamId) + 1;
       setActiveCase(gameCase);
       setPage('Investigation');
       setResult({
-        ...closedResult,
-        rank: rankIdx || undefined,
+        ...(previousScore.caseScores?.[gameCase.id] || { score: 0 }),
         message: 'This case is already closed. Your verified result is shown below.',
       });
       setSessionReady(false);
       return;
     }
-
     const localProgress = stored<{
       caseId?: string;
       report?: string;
@@ -351,7 +745,6 @@ export default function App() {
       timelineOrder?: string[];
     } | null>('arena-progress', null);
     const resumeLocal = localProgress?.caseId === gameCase.id ? localProgress : null;
-
     setActiveCase(gameCase);
     setPage('Investigation');
     setSessionReady(false);
@@ -365,9 +758,8 @@ export default function App() {
     setResult(null);
     setNotice('');
     playSignal(muted, 540);
-
     try {
-      const session = await invokeArena<{
+      const session = await invoke<{
         progress?: {
           report?: string;
           selectedEvidence?: number[];
@@ -375,14 +767,12 @@ export default function App() {
         };
         hintsUsed?: number;
         elapsedSeconds?: number;
-      }>('beginInvestigation', { caseId: gameCase.id, teamId: teamInfo.id });
-
+      }>('beginInvestigation', { caseId: gameCase.id, teamId: teamInfo?.id || null });
       const remoteProgress = session.progress || {};
       const hasRemote =
         (remoteProgress.selectedEvidence?.length || 0) > 0 ||
         Boolean(remoteProgress.report) ||
         (remoteProgress.timelineOrder?.length || 0) > 0;
-
       if (hasRemote) {
         setReport(remoteProgress.report || '');
         setSelectedEvidence(remoteProgress.selectedEvidence || []);
@@ -396,14 +786,14 @@ export default function App() {
       setElapsed(session.elapsedSeconds || 0);
       setSessionReady(true);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not initialize case session.');
+      setNotice(error instanceof Error ? error.message : 'Unable to start investigation.');
     }
   };
 
   const requestHint = async () => {
     if (!activeCase || hintCount >= activeCase.hints.length) return;
     try {
-      const response = await invokeArena<{ hintsUsed: number }>('useInvestigationHint', {
+      const response = await invoke<{ hintsUsed: number }>('useInvestigationHint', {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
       });
@@ -423,18 +813,19 @@ export default function App() {
     setSubmissionBusy(true);
     setNotice('');
     try {
-      const response = await invokeArena<CaseScore>('submitInvestigation', {
+      const response = await invoke<CaseScore>('submitInvestigation', {
         caseId: activeCase.id,
         selectedEvidence,
         timelineOrder,
         report,
-        teamId: teamInfo.id,
+        teamId: teamInfo?.id || null,
       });
       setResult(response);
       playSignal(muted, 760);
+      const nextCompleted = [...new Set([...completed, activeCase.id])];
+      localStorage.setItem('arena-completed', JSON.stringify(nextCompleted));
       localStorage.removeItem('arena-progress');
       setNotice('Verdict submitted and verified by the arena server.');
-      await loadArenaState();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Submission failed.');
     } finally {
@@ -447,12 +838,11 @@ export default function App() {
     setTeamBusy(true);
     setTeamEntryError('');
     try {
-      const data = await invokeArena<TeamInfo>('createTeam', { name: teamName.trim() });
+      const data = await invoke<TeamInfo>('createTeam', { name: teamName.trim() });
       setTeamInfo(data);
       setTeamCode(data.inviteCode);
-      await loadArenaState();
     } catch (error) {
-      setTeamEntryError(error instanceof Error ? error.message : 'Could not register team.');
+      setTeamEntryError(error instanceof Error ? error.message : 'Unable to register team.');
     } finally {
       setTeamBusy(false);
     }
@@ -463,49 +853,28 @@ export default function App() {
     setTeamBusy(true);
     setTeamEntryError('');
     try {
-      const data = await invokeArena<TeamInfo>('joinTeam', {
+      const data = await invoke<TeamInfo>('joinTeam', {
         inviteCode: teamCode.trim().toUpperCase(),
       });
       setTeamInfo(data);
-      await loadArenaState();
     } catch (error) {
-      setTeamEntryError(error instanceof Error ? error.message : 'Could not join team.');
+      setTeamEntryError(error instanceof Error ? error.message : 'Unable to join team.');
     } finally {
       setTeamBusy(false);
     }
   };
 
-  const leaveCurrentTeam = async () => {
-    if (!teamInfo) return;
-    try {
-      await invokeArena('leaveTeam', { teamId: teamInfo.id });
-      localStorage.removeItem('arena-progress');
-      setTeamInfo(null);
-      setActiveCase(null);
-      setResult(null);
-      setPage('Home');
-      await loadArenaState();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to leave team.');
-    }
-  };
-
   const joinGame = async (event: FormEvent) => {
     event.preventDefault();
-    if (!joinCode.trim()) return;
     try {
-      const data = await invokeArena<GameLobby>('joinGame', {
+      const data = await invoke<GameLobby>('joinGame', {
         inviteCode: joinCode.trim().toUpperCase(),
       });
       const assignedCase = cases.find((gameCase) => gameCase.id === data.caseId);
-      setJoinCode('');
-      if (assignedCase) {
-        await openCase(assignedCase);
-      } else {
-        setNotice(`Joined event ${data.name}.`);
-      }
+      if (assignedCase) await openCase(assignedCase);
+      else setNotice(`Joined game ${data.name}. The assigned case is unavailable in this version.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to join event lobby.');
+      setNotice(error instanceof Error ? error.message : 'Unable to join event.');
     }
   };
 
@@ -515,6 +884,16 @@ export default function App() {
     const next = [...timelineOrder];
     [next[index], next[target]] = [next[target], next[index]];
     setTimelineOrder(next);
+    localStorage.setItem(
+      'arena-progress',
+      JSON.stringify({
+        caseId: activeCase.id,
+        report,
+        selectedEvidence,
+        timelineOrder: next,
+        hintCount,
+      })
+    );
   };
 
   const copyTeamInvite = () => {
@@ -526,7 +905,7 @@ export default function App() {
   };
 
   const exportResults = () => {
-    const header = ['Rank', 'Team', 'Score', 'Completion time (s)'];
+    const header = ['Rank', 'Team', 'Score', 'Completion time'];
     const rows = leaderboard
       .filter((item) => item.mode === 'Team')
       .map((item, index) => [
@@ -555,8 +934,11 @@ export default function App() {
   if (!teamInfo) {
     return (
       <TeamRegistration
-        teamLoading={teamLoading}
+        user={user}
+        authReady={authReady}
+        supabaseConfigured={supabaseConfigured}
         teamBusy={teamBusy}
+        teamLoading={teamLoading}
         teamEntryError={teamEntryError}
         teamName={teamName}
         setTeamName={setTeamName}
@@ -608,13 +990,15 @@ export default function App() {
           ))}
         </nav>
 
-        <button
-          className={`nav-link admin-link ${page === 'Admin' ? 'active' : ''}`}
-          onClick={() => goTo('Admin')}
-        >
-          <Settings2 size={17} />
-          <span>Admin console</span>
-        </button>
+        {admin && (
+          <button
+            className={`nav-link admin-link ${page === 'Admin' ? 'active' : ''}`}
+            onClick={() => goTo('Admin')}
+          >
+            <Settings2 size={17} />
+            <span>Admin console</span>
+          </button>
+        )}
 
         <div className="side-bottom">
           <div className="account-chip">
@@ -633,10 +1017,6 @@ export default function App() {
               {copiedCode ? <Check size={14} /> : <Copy size={14} />}
             </button>
           </div>
-          <button type="button" className="leave-team-btn" onClick={leaveCurrentTeam}>
-            <LogOut size={13} />
-            <span>Switch team</span>
-          </button>
         </div>
       </aside>
 
@@ -714,10 +1094,11 @@ export default function App() {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.16 }}
+            transition={{ duration: 0.18 }}
           >
             {page === 'Investigation' && activeCase ? (
               <InvestigationView
+                key={activeCase.id}
                 activeCase={activeCase}
                 report={report}
                 setReport={setReport}
@@ -735,68 +1116,67 @@ export default function App() {
               />
             ) : null}
 
-            {page === 'Home' && (
-              <HomeView
-                cases={cases}
-                games={games}
-                announcements={announcements}
-                leaderboard={leaderboard}
-                registeredCount={registeredCount}
-                completed={completed}
-                openCase={openCase}
-                setPage={goTo}
-                setJoinCode={setJoinCode}
-                joinCode={joinCode}
-                joinGame={joinGame}
-              />
-            )}
-
-            {page === 'Dashboard' && (
-              <DashboardView
-                teamInfo={teamInfo}
-                teamScore={teamScore}
-                myRank={myRank}
-                completed={completed}
-                cases={cases}
-                openCase={openCase}
-                setPage={goTo}
-              />
-            )}
-
-            {page === 'Play Investigation' && (
-              <CaseLibrary
-                visibleCases={cases}
-                openCase={openCase}
-                completed={completed}
-                search={search}
-                setSearch={setSearch}
-              />
-            )}
-
-            {page === 'Leaderboard' && (
-              <LeaderboardView
-                filteredScores={filteredScores}
-                search={search}
-                setSearch={setSearch}
-                myRank={myRank}
-                exportResults={exportResults}
-                admin={admin}
-              />
-            )}
-
-            {page === 'My History' && (
-              <HistoryView completed={completed} cases={cases} openCase={openCase} />
+            {page !== 'Investigation' && page !== 'Admin' && (
+              <>
+                {page === 'Home' && (
+                  <HomeView
+                    cases={cases}
+                    games={games}
+                    announcements={announcements}
+                    leaderboard={leaderboard}
+                    registeredCount={registeredCount}
+                    completed={completed}
+                    openCase={openCase}
+                    setPage={goTo}
+                    setJoinCode={setJoinCode}
+                    joinCode={joinCode}
+                    joinGame={joinGame}
+                  />
+                )}
+                {page === 'Dashboard' && (
+                  <DashboardView
+                    teamInfo={teamInfo}
+                    teamScore={teamScore}
+                    myRank={myRank}
+                    completed={completed}
+                    cases={cases}
+                    openCase={openCase}
+                    setPage={goTo}
+                  />
+                )}
+                {page === 'Play Investigation' && (
+                  <CaseLibrary
+                    visibleCases={cases}
+                    openCase={openCase}
+                    completed={completed}
+                    search={search}
+                    setSearch={setSearch}
+                  />
+                )}
+                {page === 'Leaderboard' && (
+                  <LeaderboardView
+                    filteredScores={filteredScores}
+                    search={search}
+                    setSearch={setSearch}
+                    myRank={myRank}
+                    exportResults={exportResults}
+                    admin={admin}
+                  />
+                )}
+                {page === 'My History' && (
+                  <HistoryView completed={completed} cases={cases} openCase={openCase} />
+                )}
+              </>
             )}
 
             {page === 'Admin' && (
               <AdminView
                 admin={admin}
-                setAdmin={setAdmin}
                 games={games}
                 leaderboard={leaderboard}
                 exportResults={exportResults}
+                invoke={invoke}
                 setNotice={setNotice}
-                reloadState={loadArenaState}
               />
             )}
           </motion.div>
@@ -814,8 +1194,11 @@ export default function App() {
 }
 
 function TeamRegistration({
-  teamLoading,
+  user,
+  authReady,
+  supabaseConfigured,
   teamBusy,
+  teamLoading,
   teamEntryError,
   teamName,
   setTeamName,
@@ -826,8 +1209,11 @@ function TeamRegistration({
   theme,
   setTheme,
 }: {
-  teamLoading: boolean;
+  user: User | null;
+  authReady: boolean;
+  supabaseConfigured: boolean;
   teamBusy: boolean;
+  teamLoading: boolean;
   teamEntryError: string;
   teamName: string;
   setTeamName: (v: string) => void;
@@ -838,7 +1224,7 @@ function TeamRegistration({
   theme: 'dark' | 'light';
   setTheme: (t: 'dark' | 'light') => void;
 }) {
-  const unavailable = teamBusy || teamLoading;
+  const unavailable = !user || !authReady || !supabaseConfigured || teamBusy || teamLoading;
   return (
     <main className="team-entry-shell">
       <div className="ambient-grid" aria-hidden="true" />
@@ -862,12 +1248,19 @@ function TeamRegistration({
           invitation code.
         </p>
 
-        {teamLoading ? (
+        {teamLoading || !authReady ? (
           <div className="setup-callout">
             <span className="spinner" />
             <span>Preparing secure team access…</span>
           </div>
         ) : null}
+
+        {!supabaseConfigured && (
+          <div className="setup-callout">
+            <LockKeyhole size={17} />
+            <span>Connect Supabase and enable Anonymous sign-in to register or join a team.</span>
+          </div>
+        )}
 
         {teamEntryError && (
           <p className="auth-error">
@@ -925,8 +1318,8 @@ function TeamRegistration({
         <p className="team-entry-footnote">
           <Shield size={12} />
           <span>
-            Your browser stores an anonymous team token so teammates can collaborate across tabs or
-            devices.
+            A Supabase anonymous account remembers this browser&apos;s team session. Clearing
+            browser data loses access to that account.
           </span>
         </p>
       </section>
@@ -972,7 +1365,7 @@ function HomeView({
 }: {
   cases: InvestigationCase[];
   games: GameLobby[];
-  announcements: Announcement[];
+  announcements: AnnouncementItem[];
   leaderboard: RankingEntry[];
   registeredCount: number | null;
   completed: string[];
@@ -1126,20 +1519,17 @@ function HomeView({
           </form>
 
           {games.length ? (
-            games.slice(0, 3).map((game) => (
+            games.slice(0, 2).map((game) => (
               <div className="lobby-row" key={game.id}>
                 <span className="lobby-glyph">
                   <Radio size={16} />
                 </span>
                 <div>
                   <strong>{game.name}</strong>
-                  <small>
-                    {game.participantCount || 0} teams · Code{' '}
-                    <span className="mono-inline">{game.inviteCode}</span>
-                  </small>
+                  <small>{game.participantCount || 0} investigators</small>
                 </div>
                 <span className={`game-status ${game.status === 'live' ? 'is-live' : ''}`}>
-                  {game.status}
+                  {game.status || 'open'}
                 </span>
               </div>
             ))
@@ -1164,9 +1554,21 @@ function HomeView({
           </div>
           <div className="steps-grid">
             {[
-              ['01', 'Choose your case', 'Open an active case file and start an investigation with your team.'],
-              ['02', 'Read the evidence', 'Inspect the synthetic records and collect the clues that matter.'],
-              ['03', 'Reconstruct the timeline', 'Arrange events chronologically, review suspects, and use hints carefully.'],
+              [
+                '01',
+                'Choose your case',
+                'Open an active case file and start an investigation with your team.',
+              ],
+              [
+                '02',
+                'Read the evidence',
+                'Inspect the synthetic records and collect the clues that matter.',
+              ],
+              [
+                '03',
+                'Reconstruct the timeline',
+                'Arrange events chronologically, review suspects, and use hints carefully.',
+              ],
               [
                 '04',
                 'Submit a verdict',
@@ -1191,13 +1593,13 @@ function HomeView({
             <Bell size={16} />
           </div>
           {announcements.length ? (
-            announcements.slice(0, 4).map((item) => (
+            announcements.map((item) => (
               <article className="dispatch" key={item.id}>
                 <span className="dispatch-dot" />
                 <div>
                   <strong>{item.title}</strong>
                   <p>{item.message}</p>
-                  <small>{new Date(item.createdAt).toLocaleDateString()}</small>
+                  <small>{formatAnnouncementDate(item.createdAt)}</small>
                 </div>
               </article>
             ))
@@ -1307,7 +1709,7 @@ function DashboardView({
             <div className="eyebrow">TEAM INVITATION</div>
             <p>
               Share code <strong className="mono-inline">{teamInfo.inviteCode}</strong> so teammates
-              can join <strong>{teamInfo.name}</strong> ({teamInfo.memberIds.length}/4 members).
+              can join <strong>{teamInfo.name}</strong> from their own devices.
             </p>
           </div>
         </section>
@@ -1707,7 +2109,7 @@ function InvestigationView({
                     maxLength={500}
                     value={report}
                     onChange={(event) => setReport(event.target.value)}
-                    placeholder="Summarize your team's findings and cite the clues supporting your timeline."
+                    placeholder="Summarize your conclusion and cite the clues that support it."
                   />
                 </label>
 
@@ -1722,6 +2124,11 @@ function InvestigationView({
                   </span>
                   <ArrowRight size={15} />
                 </button>
+                {!window.navigator.onLine && (
+                  <p className="muted-copy">
+                    You appear offline. Progress remains on this device until connection returns.
+                  </p>
+                )}
               </form>
             </>
           )}
@@ -1766,7 +2173,7 @@ function InvestigationView({
                 <Activity size={17} />
               </div>
               <p className="timeline-help">
-                Use the arrows to arrange events in chronological order (60 pts).
+                Use the arrows to arrange events in chronological order.
               </p>
               <ol className="timeline-list">
                 {timelineOrder.map((event, index) => (
@@ -1848,20 +2255,24 @@ function ResultPanel({
       {result.explanations && result.explanations.length > 0 && (
         <div className="explanation-list">
           <h3>Case debrief</h3>
-          {result.explanations.map((item) => (
-            <div
-              key={item.title}
-              className={`debrief-item ${item.correct ? 'is-correct' : 'is-wrong'}`}
-            >
-              <span className="debrief-icon">
-                {item.correct ? <Check size={14} /> : <X size={14} />}
-              </span>
-              <div>
-                <strong>{item.title}</strong>
-                <p>{item.explanation}</p>
+          {result.explanations.map((item, idx) => {
+            const label = item.title || `Finding ${idx + 1}`;
+            const isCorrect = item.correct !== false;
+            return (
+              <div
+                key={`${label}-${idx}`}
+                className={`debrief-item ${isCorrect ? 'is-correct' : 'is-wrong'}`}
+              >
+                <span className="debrief-icon">
+                  {isCorrect ? <Check size={14} /> : <X size={14} />}
+                </span>
+                <div>
+                  <strong>{label}</strong>
+                  <p>{item.explanation}</p>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -2027,7 +2438,7 @@ function HistoryView({
       <PageHeading
         eyebrow="PERSONAL CASE FILES"
         title="My History"
-        description="Review closed cases and inspect your server-verified debrief."
+        description="Review closed cases or return to an investigation you have not completed."
       />
       {historyCases.length ? (
         <div className="case-grid">
@@ -2053,70 +2464,36 @@ function HistoryView({
 
 function AdminView({
   admin,
-  setAdmin,
   games,
   leaderboard,
   exportResults,
+  invoke,
   setNotice,
-  reloadState,
 }: {
   admin: boolean;
-  setAdmin: (v: boolean) => void;
   games: GameLobby[];
   leaderboard: RankingEntry[];
   exportResults: () => void;
+  invoke: <T = Record<string, unknown>>(name: string, data?: Record<string, unknown>) => Promise<T>;
   setNotice: (v: string) => void;
-  reloadState: () => Promise<void>;
 }) {
-  const [passcode, setPasscode] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
-  const [eventForm, setEventForm] = useState<{
-    name: string;
-    caseId: string;
-    inviteCode: string;
-  }>({
+  const [eventForm, setEventForm] = useState({
     name: '',
     caseId: cases[0].id,
     inviteCode: '',
+    status: 'open',
   });
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
   const [busy, setBusy] = useState(false);
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
 
-  const unlockAdmin = async (event: FormEvent) => {
-    event.preventDefault();
-    setAuthBusy(true);
-    try {
-      const response = await invokeArena<{ adminToken: string; isAdmin: boolean }>('adminLogin', {
-        passcode,
-      });
-      setStoredAdminToken(response.adminToken);
-      setAdmin(true);
-      setPasscode('');
-      setNotice('Organizer console unlocked.');
-      await reloadState();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Invalid organizer passcode.');
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const lockAdmin = () => {
-    setStoredAdminToken('');
-    setAdmin(false);
-    setTeams([]);
-    setNotice('Signed out of organizer console.');
-  };
-
   const createEvent = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      const result = await invokeArena<GameLobby>('adminCreateGame', eventForm);
+      const result = await invoke<GameLobby>('adminCreateGame', eventForm);
       setNotice(`Event created with invitation code ${result.inviteCode}.`);
-      setEventForm({ name: '', caseId: cases[0].id, inviteCode: '' });
-      await reloadState();
+      setEventForm({ name: '', caseId: cases[0].id, inviteCode: '', status: 'open' });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Unable to create event.');
     } finally {
@@ -2124,11 +2501,10 @@ function AdminView({
     }
   };
 
-  const changeStatus = async (gameId: string, status: GameLobby['status']) => {
+  const changeStatus = async (gameId: string, status: string) => {
     try {
-      await invokeArena('adminSetGameStatus', { gameId, status });
+      await invoke('adminSetGameStatus', { gameId, status });
       setNotice(`Event status changed to ${status}.`);
-      await reloadState();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Unable to update event status.');
     }
@@ -2137,10 +2513,9 @@ function AdminView({
   const publishAnnouncement = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      await invokeArena('adminAnnounce', announcement);
+      await invoke('adminAnnounce', announcement);
       setAnnouncement({ title: '', message: '' });
       setNotice('Announcement published.');
-      await reloadState();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Unable to publish announcement.');
     }
@@ -2148,37 +2523,20 @@ function AdminView({
 
   const loadTeams = async () => {
     try {
-      const result = await invokeArena<{ teams: AdminTeamSummary[] }>('adminListTeams', {});
+      const result = await invoke<{ teams?: AdminTeamSummary[] }>('adminListTeams', {});
       setTeams(result.teams || []);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to load registered teams.');
+      setNotice(error instanceof Error ? error.message : 'Unable to load teams.');
     }
   };
 
   if (!admin) {
     return (
-      <section className="empty-state admin-locked">
-        <LockKeyhole size={28} />
+      <div className="empty-state admin-locked">
+        <LockKeyhole size={26} />
         <h2>Administrator access required</h2>
-        <p>
-          Enter the organizer passcode configured in <code>ADMIN_PASSCODE</code> to manage event
-          lobbies, dispatches, and registered teams.
-        </p>
-        <form className="admin-unlock-form" onSubmit={unlockAdmin}>
-          <input
-            type="password"
-            required
-            value={passcode}
-            onChange={(event) => setPasscode(event.target.value)}
-            placeholder="Organizer passcode"
-            aria-label="Organizer passcode"
-          />
-          <button className="button button-primary" disabled={authBusy}>
-            <KeyRound size={15} />
-            <span>{authBusy ? 'Verifying…' : 'Unlock console'}</span>
-          </button>
-        </form>
-      </section>
+        <p>This panel is restricted to accounts with the Supabase app metadata admin claim.</p>
+      </div>
     );
   }
 
@@ -2189,16 +2547,10 @@ function AdminView({
         title="Arena control room"
         description="Manage events and announcements. Case answers and score validation remain server-controlled."
         action={
-          <div className="admin-header-actions">
-            <button className="button button-outline" onClick={exportResults}>
-              <ArrowDown size={15} />
-              <span>Export results</span>
-            </button>
-            <button className="button button-outline" onClick={lockAdmin}>
-              <LockKeyhole size={15} />
-              <span>Lock</span>
-            </button>
-          </div>
+          <button className="button button-outline" onClick={exportResults}>
+            <ArrowDown size={15} />
+            <span>Export results</span>
+          </button>
         }
       />
 
@@ -2325,9 +2677,7 @@ function AdminView({
             <div className="participant-list">
               {teams.map((team) => (
                 <div key={team.id}>
-                  <span>
-                    {team.name} <small className="mono-inline">({team.inviteCode})</small>
-                  </span>
+                  <span>{team.name}</span>
                   <small>{team.memberCount} members</small>
                 </div>
               ))}
