@@ -2456,6 +2456,7 @@ th {
   border-radius: 10px;
   border: 1px solid var(--border-strong);
   background: var(--bg-input);
+  color: var(--text);
 }
 
 .admin-header-actions {

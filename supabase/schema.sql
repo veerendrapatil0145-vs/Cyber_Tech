@@ -146,5 +146,23 @@ begin
   end loop;
 end $$;
 
+-- Drop NOT NULL on any legacy pre-existing columns (e.g. games.title) so inserts succeed
+do $$
+declare
+  col record;
+begin
+  for col in
+    select table_name, column_name
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name in ('teams', 'rankings', 'games')
+      and is_nullable = 'NO'
+      and column_default is null
+      and column_name not in ('id', 'invite_code', 'team_id', 'name', 'member_ids', 'owner_id')
+  loop
+    execute format('alter table public.%I alter column %I drop not null', col.table_name, col.column_name);
+  end loop;
+end $$;
+
 -- Reload PostgREST schema cache immediately
 notify pgrst, 'reload schema';

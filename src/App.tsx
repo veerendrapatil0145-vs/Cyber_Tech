@@ -174,6 +174,7 @@ const mapRanking = (row: Record<string, unknown>): RankingEntry => ({
 
 const mapGame = (row: Record<string, unknown>): GameLobby => ({
   ...(row as unknown as GameLobby),
+  name: (row.name as string) ?? (row.title as string) ?? 'Event',
   inviteCode: (row.invite_code as string) ?? (row.inviteCode as string),
   participantCount: (row.participant_count as number) ?? (row.participantCount as number),
   caseId: (row.case_id as string) ?? (row.caseId as string),
@@ -438,6 +439,47 @@ export default function App() {
     };
   }, [user, useLocalBackend, adminToken]);
 
+  const refreshArenaData = useCallback(async () => {
+    if (!user) return;
+    if (!supabase || useLocalBackend) {
+      try {
+        const stateHeaders: Record<string, string> = { 'x-arena-player': user.id };
+        if (adminToken) stateHeaders['x-arena-admin'] = adminToken;
+        const response = await fetch('/api/state', { headers: stateHeaders });
+        if (!response.ok) return;
+        const payload = (await response.json()) as {
+          rankings?: Record<string, unknown>[];
+          games?: Record<string, unknown>[];
+          announcements?: Record<string, unknown>[];
+          stats?: { registered_teams?: number };
+        };
+        setLeaderboard((payload.rankings || []).map(mapRanking));
+        setGames((payload.games || []).map(mapGame));
+        setAnnouncements((payload.announcements || []).map(mapAnnouncement));
+        if (typeof payload.stats?.registered_teams === 'number') {
+          setRegisteredCount(payload.stats.registered_teams);
+        }
+      } catch {
+        // Ignore transient refresh failure.
+      }
+      return;
+    }
+
+    const client = supabase;
+    const [rankingsRes, gamesRes, announcementsRes, statsRes] = await Promise.all([
+      client.from('rankings').select('*').order('score', { ascending: false }).limit(500),
+      client.from('games').select('*').order('created_at', { ascending: false }).limit(20),
+      client.from('announcements').select('*').order('created_at', { ascending: false }).limit(4),
+      client.from('stats').select('registered_teams').eq('id', 1).maybeSingle(),
+    ]);
+    if (!rankingsRes.error) setLeaderboard((rankingsRes.data || []).map(mapRanking));
+    if (!gamesRes.error) setGames((gamesRes.data || []).map(mapGame));
+    if (!announcementsRes.error) setAnnouncements((announcementsRes.data || []).map(mapAnnouncement));
+    if (!statsRes.error && statsRes.data) {
+      setRegisteredCount(statsRes.data.registered_teams ?? 0);
+    }
+  }, [user, useLocalBackend, adminToken]);
+
   useEffect(() => {
     if (!supabase || useLocalBackend) return undefined;
     const client = supabase;
@@ -600,15 +642,25 @@ export default function App() {
   );
 
   const unlockAdmin = async (passcode: string) => {
-    const data = await invoke<{ adminToken: string; isAdmin: boolean }>('adminLogin', {
-      passcode,
-    });
-    if (data.adminToken) {
-      localStorage.setItem('arena-admin-token', JSON.stringify(data.adminToken));
-      setAdminToken(data.adminToken);
+    try {
+      const data = await invoke<{ adminToken: string; isAdmin: boolean }>('adminLogin', {
+        passcode,
+      });
+      if (data.adminToken) {
+        localStorage.setItem('arena-admin-token', JSON.stringify(data.adminToken));
+        setAdminToken(data.adminToken);
+      }
+      setAdmin(true);
+      setNotice('Admin console unlocked.');
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Invalid organizer passcode.';
+      if (msg === 'Administrator access required.') {
+        throw new Error(
+          'Your deployed Supabase "arena" Edge Function is outdated. Redeploy supabase/functions/arena/index.ts to enable passcode login.'
+        );
+      }
+      throw error;
     }
-    setAdmin(true);
-    setNotice('Admin console unlocked.');
   };
 
   const lockAdmin = () => {
@@ -1269,6 +1321,7 @@ export default function App() {
                 setNotice={setNotice}
                 unlockAdmin={unlockAdmin}
                 lockAdmin={lockAdmin}
+                refreshArenaData={refreshArenaData}
               />
             )}
           </motion.div>
@@ -2563,6 +2616,7 @@ function AdminView({
   setNotice,
   unlockAdmin,
   lockAdmin,
+  refreshArenaData,
 }: {
   admin: boolean;
   games: GameLobby[];
@@ -2572,6 +2626,7 @@ function AdminView({
   setNotice: (v: string) => void;
   unlockAdmin: (passcode: string) => Promise<void>;
   lockAdmin: () => void;
+  refreshArenaData: () => Promise<void>;
 }) {
   const [eventForm, setEventForm] = useState({
     name: '',
@@ -2581,10 +2636,40 @@ function AdminView({
   });
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
   const [busy, setBusy] = useState(false);
+  const [eventError, setEventError] = useState('');
+  const [announceBusy, setAnnounceBusy] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [unlockError, setUnlockError] = useState('');
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
+
+  const handleAdminError = useCallback(
+    (error: unknown, fallback: string) => {
+      const msg = error instanceof Error ? error.message : fallback;
+      if (msg.includes('Administrator access required')) {
+        lockAdmin();
+        setNotice('Admin session expired. Please unlock again with your passcode.');
+        return;
+      }
+      setNotice(msg);
+    },
+    [lockAdmin, setNotice]
+  );
+
+  const loadTeams = useCallback(async () => {
+    try {
+      const result = await invoke<{ teams?: AdminTeamSummary[] }>('adminListTeams', {});
+      setTeams(result.teams || []);
+    } catch (error) {
+      handleAdminError(error, 'Unable to load teams.');
+    }
+  }, [invoke, handleAdminError]);
+
+  useEffect(() => {
+    if (!admin) return;
+    void loadTeams();
+    void refreshArenaData();
+  }, [admin, loadTeams, refreshArenaData]);
 
   const handleUnlock = async (event: FormEvent) => {
     event.preventDefault();
@@ -2603,12 +2688,16 @@ function AdminView({
   const createEvent = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
+    setEventError('');
     try {
       const result = await invoke<GameLobby>('adminCreateGame', eventForm);
       setNotice(`Event created with invitation code ${result.inviteCode}.`);
       setEventForm({ name: '', caseId: cases[0].id, inviteCode: '', status: 'open' });
+      await refreshArenaData();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to create event.');
+      const msg = error instanceof Error ? error.message : 'Unable to create event.';
+      setEventError(msg);
+      handleAdminError(error, 'Unable to create event.');
     } finally {
       setBusy(false);
     }
@@ -2618,28 +2707,24 @@ function AdminView({
     try {
       await invoke('adminSetGameStatus', { gameId, status });
       setNotice(`Event status changed to ${status}.`);
+      await refreshArenaData();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to update event status.');
+      handleAdminError(error, 'Unable to update event status.');
     }
   };
 
   const publishAnnouncement = async (event: FormEvent) => {
     event.preventDefault();
+    setAnnounceBusy(true);
     try {
       await invoke('adminAnnounce', announcement);
       setAnnouncement({ title: '', message: '' });
       setNotice('Announcement published.');
+      await refreshArenaData();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to publish announcement.');
-    }
-  };
-
-  const loadTeams = async () => {
-    try {
-      const result = await invoke<{ teams?: AdminTeamSummary[] }>('adminListTeams', {});
-      setTeams(result.teams || []);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to load teams.');
+      handleAdminError(error, 'Unable to publish announcement.');
+    } finally {
+      setAnnounceBusy(false);
     }
   };
 
@@ -2757,6 +2842,12 @@ function AdminView({
               <span>{busy ? 'Creating...' : 'Create invitation lobby'}</span>
               <ArrowRight size={14} />
             </button>
+            {eventError && (
+              <p className="auth-error">
+                <ShieldAlert size={14} />
+                <span>{eventError}</span>
+              </p>
+            )}
           </form>
         </section>
 
@@ -2855,8 +2946,8 @@ function AdminView({
                 }
               />
             </label>
-            <button className="button button-outline">
-              <span>Publish announcement</span>
+            <button className="button button-outline" disabled={announceBusy}>
+              <span>{announceBusy ? 'Publishing...' : 'Publish announcement'}</span>
               <Send size={14} />
             </button>
           </form>

@@ -408,7 +408,35 @@ Deno.serve(async (req) => {
         .eq('invite_code', inviteCode)
         .maybeSingle();
       if (!game) return json({ error: 'No event lobby matches that code.' }, 404);
-      return json({ id: game.id, name: game.name, caseId: game.case_id, status: game.status });
+      if (game.status === 'ended') {
+        return json({ error: 'This event lobby has already ended.' }, 400);
+      }
+      const { data: myTeam } = await adminClient
+        .from('teams')
+        .select('id')
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (myTeam) {
+        const existingParticipants = Array.isArray(game.participant_team_ids)
+          ? game.participant_team_ids
+          : [];
+        if (!existingParticipants.includes(myTeam.id)) {
+          const nextParticipants = [...existingParticipants, myTeam.id];
+          await adminClient
+            .from('games')
+            .update({
+              participant_team_ids: nextParticipants,
+              participant_count: nextParticipants.length,
+            })
+            .eq('id', game.id);
+        }
+      }
+      return json({
+        id: game.id,
+        name: game.name || game.title,
+        caseId: game.case_id,
+        status: game.status,
+      });
     }
 
     const tokenAdmin = await verifyAdminToken(
@@ -421,12 +449,14 @@ Deno.serve(async (req) => {
     if (!isAdmin) return json({ error: 'Administrator access required.' }, 403);
 
     if (action === 'adminCreateGame') {
+      const name = String(payload.name || '').trim();
+      if (!name) return json({ error: 'Event name is required.' }, 400);
       const inviteCode =
         String(payload.inviteCode || '').trim().toUpperCase() || generateInviteCode(6);
       const { data: game, error } = await adminClient
         .from('games')
         .insert({
-          name: String(payload.name || '').trim(),
+          name,
           case_id: String(payload.caseId || 'shadow-trace'),
           invite_code: inviteCode,
           status: 'open',
@@ -434,27 +464,38 @@ Deno.serve(async (req) => {
         .select('*')
         .single();
       if (error) return json({ error: error.message }, 400);
-      return json({ id: game.id, name: game.name, inviteCode: game.invite_code });
+      return json({
+        id: game.id,
+        name: game.name,
+        caseId: game.case_id,
+        inviteCode: game.invite_code,
+        status: game.status,
+        participantCount: game.participant_count ?? 0,
+        createdAt: game.created_at,
+      });
     }
 
     if (action === 'adminSetGameStatus') {
-      await adminClient
+      const { error } = await adminClient
         .from('games')
         .update({ status: String(payload.status || 'open') })
         .eq('id', String(payload.gameId || ''));
+      if (error) return json({ error: error.message }, 400);
       return json({ ok: true });
     }
 
     if (action === 'adminAnnounce') {
-      await adminClient.from('announcements').insert({
+      const { error } = await adminClient.from('announcements').insert({
         title: String(payload.title || '').trim(),
         message: String(payload.message || '').trim(),
       });
+      if (error) return json({ error: error.message }, 400);
       return json({ ok: true });
     }
 
     if (action === 'adminListTeams') {
-      const { data } = await adminClient.from('teams').select('id, name, member_ids');
+      const { data, error } = await adminClient.from('teams').select('id, name, member_ids');
+      if (error) return json({ error: error.message }, 400);
       return json({
         teams: (data || []).map((t) => ({
           id: t.id,
