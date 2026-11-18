@@ -54,9 +54,25 @@ interface GameRecord {
   caseId: string;
   inviteCode: string;
   status: 'open' | 'live' | 'paused' | 'ended';
+  durationMinutes?: number;
   participantCount: number;
   participantTeamIds: string[];
   createdAt: string;
+}
+
+function normalizeGameDurationMinutes(raw: unknown, name?: string): number {
+  const fromRaw = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  if (Number.isFinite(fromRaw) && fromRaw >= 1) {
+    return Math.max(1, Math.min(300, Math.round(fromRaw)));
+  }
+  const match = typeof name === 'string' ? name.match(/\((\d+)\s*m\)/i)?.[1] : undefined;
+  if (match) {
+    const parsed = Number(match);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.max(1, Math.min(300, Math.round(parsed)));
+    }
+  }
+  return 30;
 }
 
 interface AnnouncementRecord {
@@ -627,6 +643,7 @@ async function startServer() {
         const rawCode =
           typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
         const inviteCode = rawCode || generateInviteCode(6);
+        const durationMinutes = normalizeGameDurationMinutes(payload.durationMinutes, name);
 
         if (!name) {
           res.status(400).json({ error: 'Event name is required.' });
@@ -647,6 +664,7 @@ async function startServer() {
           caseId,
           inviteCode,
           status: 'open',
+          durationMinutes,
           participantCount: 0,
           participantTeamIds: [],
           createdAt: new Date().toISOString(),
@@ -676,6 +694,12 @@ async function startServer() {
           return;
         }
         game.status = status;
+        if (typeof payload.name === 'string' && payload.name.trim()) {
+          game.name = payload.name.trim();
+        }
+        if (payload.durationMinutes !== undefined) {
+          game.durationMinutes = normalizeGameDurationMinutes(payload.durationMinutes, game.name);
+        }
         await persistDb(db);
         broadcastEvent('state', buildPublicState(db, false));
         res.json(game);

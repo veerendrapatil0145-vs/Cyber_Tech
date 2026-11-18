@@ -1232,6 +1232,115 @@
   color: var(--text-secondary);
 }
 
+.rules-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+  margin-bottom: 1.25rem;
+}
+
+.rules-subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+}
+
+.rules-mission-card,
+.rules-card {
+  padding: 1.05rem 1.15rem;
+  border-radius: 12px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+}
+
+.rules-mission-card p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.rules-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.95rem;
+}
+
+.rules-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.65rem;
+}
+
+.rules-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 0.35rem;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.rules-card-head strong {
+  font-size: 0.96rem;
+  color: var(--text-primary);
+}
+
+.rules-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.rules-list-two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1.5rem;
+}
+
+.rules-list li {
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.rules-list li b {
+  color: var(--text-primary);
+}
+
+.rules-tip-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.9rem 1.05rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.rules-tip-callout svg {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.rules-tip-callout strong {
+  color: var(--text-primary);
+}
+
 .dispatch {
   display: flex;
   align-items: flex-start;
@@ -2640,6 +2749,108 @@ th {
   color: var(--text-secondary);
 }
 
+.admin-launch-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.admin-duration-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+}
+
+.admin-duration-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+}
+
+.admin-duration-field label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.admin-duration-field input {
+  width: 68px;
+  padding: 0.28rem 0.45rem;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.admin-duration-field span {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+}
+
+.admin-duration-presets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.admin-preset-btn {
+  min-height: 30px;
+  padding: 0 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.admin-preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.admin-preset-btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.admin-launch-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+@media (max-width: 780px) {
+  .admin-launch-controls {
+    align-items: flex-start;
+    width: 100%;
+  }
+
+  .admin-duration-row,
+  .admin-launch-buttons {
+    justify-content: flex-start;
+  }
+}
+
 .arena-gate-card {
   display: flex;
   flex-direction: column;
@@ -2762,6 +2973,8 @@ th {
   .evidence-grid,
   .suspect-grid,
   .steps-grid,
+  .rules-grid,
+  .rules-list-two-col,
   .podium-grid,
   .result-stats {
     grid-template-columns: 1fr;

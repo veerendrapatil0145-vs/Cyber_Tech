@@ -99,6 +99,7 @@ interface GameLobby {
   participantCount?: number;
   caseId?: string;
   status?: string;
+  durationMinutes?: number;
   createdAt?: string;
 }
 
@@ -139,7 +140,25 @@ const iconByName = {
   sun: Sun,
 } as const;
 
-const GAME_DURATION_SECONDS = 30 * 60;
+const DEFAULT_GAME_DURATION_MINUTES = 30;
+
+function clampGameDurationMinutes(value: unknown, fallback = DEFAULT_GAME_DURATION_MINUTES): number {
+  const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (!Number.isFinite(num) || num < 1) return fallback;
+  return Math.max(1, Math.min(300, Math.round(num)));
+}
+
+function parseDurationMinutesFromGame(game?: Pick<GameLobby, 'durationMinutes' | 'name'> | null): number | null {
+  if (!game) return null;
+  if (typeof game.durationMinutes === 'number' && Number.isFinite(game.durationMinutes) && game.durationMinutes >= 1) {
+    return clampGameDurationMinutes(game.durationMinutes);
+  }
+  const match = typeof game.name === 'string' ? game.name.match(/\((\d+)\s*m\)/i)?.[1] : undefined;
+  if (match) {
+    return clampGameDurationMinutes(Number(match));
+  }
+  return null;
+}
 
 interface LocalSessionRecord {
   startedAt: number;
@@ -210,14 +229,26 @@ const mapRanking = (row: Record<string, unknown>): RankingEntry => ({
   caseScores: (row.case_scores as Record<string, CaseScore>) ?? (row.caseScores as Record<string, CaseScore>),
 });
 
-const mapGame = (row: Record<string, unknown>): GameLobby => ({
-  ...(row as unknown as GameLobby),
-  name: (row.name as string) ?? (row.title as string) ?? 'Event',
-  inviteCode: (row.invite_code as string) ?? (row.inviteCode as string),
-  participantCount: (row.participant_count as number) ?? (row.participantCount as number),
-  caseId: (row.case_id as string) ?? (row.caseId as string),
-  createdAt: (row.created_at as string) ?? (row.createdAt as string),
-});
+const mapGame = (row: Record<string, unknown>): GameLobby => {
+  const name = (row.name as string) ?? (row.title as string) ?? 'Event';
+  const rawDuration = (row.duration_minutes as number) ?? (row.durationMinutes as number);
+  const parsedFromName = name.match(/\((\d+)\s*m\)/i)?.[1];
+  const durationMinutes =
+    typeof rawDuration === 'number' && Number.isFinite(rawDuration) && rawDuration >= 1
+      ? clampGameDurationMinutes(rawDuration)
+      : parsedFromName
+      ? clampGameDurationMinutes(Number(parsedFromName))
+      : undefined;
+  return {
+    ...(row as unknown as GameLobby),
+    name,
+    inviteCode: (row.invite_code as string) ?? (row.inviteCode as string),
+    participantCount: (row.participant_count as number) ?? (row.participantCount as number),
+    caseId: (row.case_id as string) ?? (row.caseId as string),
+    durationMinutes,
+    createdAt: (row.created_at as string) ?? (row.createdAt as string),
+  };
+};
 
 const mapAnnouncement = (row: Record<string, unknown>): AnnouncementItem => ({
   ...(row as unknown as AnnouncementItem),
@@ -916,11 +947,23 @@ export default function App() {
   const myTeamEntry = myTeamIndex >= 0 ? teamRankings[myTeamIndex] : null;
   const teamScore = myTeamEntry?.score ?? 0;
 
+  const activeOrLatestGame = useMemo(
+    () =>
+      games.find((game) => game.status === 'live') ||
+      games.find((game) => game.status === 'paused') ||
+      games[0] ||
+      null,
+    [games]
+  );
+  const configuredGameMinutes =
+    parseDurationMinutesFromGame(activeOrLatestGame) ?? DEFAULT_GAME_DURATION_MINUTES;
+  const totalGameDurationSeconds = configuredGameMinutes * 60;
+
   const secondsRemaining = Math.max(0, (activeCase?.duration || 0) * 60 - elapsed);
   const timer = formatClock(secondsRemaining);
   const gameSecondsRemaining = gameStartedAt
-    ? Math.max(0, GAME_DURATION_SECONDS - gameElapsed)
-    : GAME_DURATION_SECONDS;
+    ? Math.max(0, totalGameDurationSeconds - gameElapsed)
+    : totalGameDurationSeconds;
   const gameTimer = formatClock(gameSecondsRemaining);
 
 
@@ -973,7 +1016,7 @@ export default function App() {
       return;
     }
     if (gameStartedAt && gameSecondsRemaining <= 0) {
-      setNotice('The 30-minute arena game clock has ended.');
+      setNotice(`The ${configuredGameMinutes}-minute arena game clock has ended.`);
       return;
     }
     if (!gameStartedAt) {
@@ -1372,12 +1415,14 @@ export default function App() {
   }, [page, activeCase?.id, result, scrollPageToTop]);
 
   useEffect(() => {
-    if (!user || !teamInfo || hasLiveEvent) return undefined;
+    if (!user || !teamInfo) return undefined;
+    if (useLocalBackend && hasLiveEvent) return undefined;
+    const intervalMs = hasLiveEvent ? 15000 : 6000;
     const poller = window.setInterval(() => {
       void refreshArenaData();
-    }, 6000);
+    }, intervalMs);
     return () => window.clearInterval(poller);
-  }, [user, teamInfo, hasLiveEvent, refreshArenaData]);
+  }, [user, teamInfo, hasLiveEvent, useLocalBackend, refreshArenaData]);
 
   const goTo = (label: PageName) => {
     scrollPageToTop();
@@ -1504,7 +1549,7 @@ export default function App() {
                   ? 'is-warning'
                   : ''
               }`}
-              title="Entire game timer (30 minutes)"
+              title={`Entire game timer (${configuredGameMinutes} minutes)`}
             >
               <Clock3 size={13} />
               <span>GAME · {gameTimer}</span>
@@ -1585,6 +1630,7 @@ export default function App() {
                 timer={timer}
                 caseExpired={secondsRemaining === 0}
                 gameTimer={gameTimer}
+                configuredGameMinutes={configuredGameMinutes}
                 gameExpired={gameSecondsRemaining === 0}
                 result={result}
                 submitCase={submitCase}
@@ -1603,6 +1649,7 @@ export default function App() {
                     leaderboard={effectiveLeaderboard}
                     registeredCount={registeredCount}
                     hasLiveEvent={hasLiveEvent}
+                    configuredGameMinutes={configuredGameMinutes}
                     myRank={myRank}
                     admin={admin}
                     setPage={goTo}
@@ -1655,6 +1702,7 @@ export default function App() {
               <AdminView
                 admin={admin}
                 hasLiveEvent={hasLiveEvent}
+                configuredGameMinutes={configuredGameMinutes}
                 games={games}
                 leaderboard={effectiveLeaderboard}
                 exportResults={exportResults}
@@ -1810,6 +1858,7 @@ function HomeView({
   leaderboard,
   registeredCount,
   hasLiveEvent,
+  configuredGameMinutes,
   myRank,
   admin,
   setPage,
@@ -1820,6 +1869,7 @@ function HomeView({
   leaderboard: RankingEntry[];
   registeredCount: number | null;
   hasLiveEvent: boolean;
+  configuredGameMinutes: number;
   myRank: number;
   admin: boolean;
   setPage: (p: PageName) => void;
@@ -1852,7 +1902,7 @@ function HomeView({
               <b>{caseList.length}</b> original cases
             </span>
             <span>
-              <b>5 min</b> per case · <b>30 min</b> game
+              <b>5 min</b> per case · <b>{configuredGameMinutes} min</b> game
             </span>
             <span>
               <b>Live</b> team rankings
@@ -1926,81 +1976,167 @@ function HomeView({
         </div>
       </section>
 
-      <div className="content-grid lower-grid">
-        <section className="section-block">
-          <div className="section-heading">
-            <div>
-              <div className="eyebrow">THE INVESTIGATION LOOP</div>
-              <h2>How to play</h2>
-            </div>
-            <span className="section-number">01—04</span>
+      <section className="section-block rules-section" aria-labelledby="rules-heading">
+        <div className="section-heading">
+          <div>
+            <div className="eyebrow">AVON TECH EVENT · OFFICIAL GUIDELINES</div>
+            <h2 id="rules-heading">Cyber Mystery Arena: Rules &amp; Regulations</h2>
+            <p className="rules-subtitle">
+              Participant Instructions, Scoring Policy &amp; Fair Play Code
+            </p>
           </div>
-          <div className="steps-grid">
-            {[
-              [
-                '01',
-                'Choose your case',
-                'Open an active case file and start an investigation with your team.',
-              ],
-              [
-                '02',
-                'Read the evidence',
-                'Inspect the synthetic records and collect the clues that matter.',
-              ],
-              [
-                '03',
-                'Reconstruct the timeline',
-                'Arrange events chronologically, review suspects, and use hints carefully.',
-              ],
-              [
-                '04',
-                'Submit a verdict',
-                "The arena verifies your team's work and updates the live rankings.",
-              ],
-            ].map(([number, title, copy]) => (
-              <div className="step-item" key={number}>
-                <span>{number}</span>
-                <strong>{title}</strong>
-                <p>{copy}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+          <a
+            className="button button-outline"
+            href="/assets/aistudio/Avon_-_Cyber_Mystery_Arena_Rules___Regulations_c957d254.pdf"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <FileText size={15} />
+            <span>Open Rules PDF</span>
+          </a>
+        </div>
 
-        <section className="section-block announcement-section">
-          <div className="section-heading">
-            <div>
-              <div className="eyebrow">ARENA DISPATCHES</div>
-              <h2>Latest intel</h2>
-            </div>
-            <Bell size={16} />
+        <div className="rules-mission-card">
+          <div className="rules-card-head">
+            <span className="rules-num">01</span>
+            <strong>Mission Objective</strong>
           </div>
-          {announcements.length ? (
-            announcements.map((item) => (
-              <article className="dispatch" key={item.id}>
-                <span className="dispatch-dot" />
-                <div>
-                  <strong>{item.title}</strong>
-                  <p>{item.message}</p>
-                  <small>{formatAnnouncementDate(item.createdAt)}</small>
-                </div>
-              </article>
-            ))
-          ) : (
-            <div className="dispatch empty-dispatch">
+          <p>
+            Your objective is to investigate simulated digital crime scenes, analyze system logs and
+            suspect alibis, reconstruct the exact sequence of events, and identify the true culprit
+            before the event timer expires. Cases remain locked until the administrator starts the
+            game.
+          </p>
+        </div>
+
+        <div className="rules-grid">
+          <article className="rules-card">
+            <div className="rules-card-head">
+              <span className="rules-num">02</span>
+              <strong>How to Play</strong>
+            </div>
+            <ul className="rules-list">
+              <li>
+                <b>Inspect Evidence:</b> Open the <em>Evidence</em> tab to examine server access logs,
+                chat snippets, IP addresses, device records, and timestamps.
+              </li>
+              <li>
+                <b>Cross-Examine Suspects:</b> Review every suspect&apos;s role and statement in the{' '}
+                <em>Suspects</em> tab and verify their alibi against the digital logs.
+              </li>
+              <li>
+                <b>Reconstruct the Timeline:</b> Use the directional arrows in the{' '}
+                <em>Sequence Reconstruction</em> panel to arrange the 4 scrambled events in strict
+                chronological order (earliest to latest).
+              </li>
+              <li>
+                <b>Submit Final Verdict:</b> In <em>Summarize the Answer</em>, name the single true
+                culprit with brief supporting information (up to 500 characters) and click{' '}
+                <em>Submit Final Verdict</em>.
+              </li>
+            </ul>
+          </article>
+
+          <article className="rules-card">
+            <div className="rules-card-head">
+              <span className="rules-num">03</span>
+              <strong>Scoring, Timers &amp; Hints</strong>
+            </div>
+            <ul className="rules-list">
+              <li>
+                <b>50 / 50 Scoring Split:</b> Each case is worth 100 points — <b>50 pts</b> for{' '}
+                <em>Sequence Recognition</em> (divided equally across the 4 timeline orders at 12.5
+                pts each) and <b>50 pts</b> for <em>Answer Summary</em>.
+              </li>
+              <li>
+                <b>Answer Summary Rule:</b> Naming only the true culprit with brief supporting
+                details earns full <b>50 / 50</b> summary marks. Entering multiple culprit or
+                suspect names reduces your score (<b>-15 PTS</b> per extra name).
+              </li>
+              <li>
+                <b>Case &amp; Game Timers:</b> Each case auto-closes after <b>5 minutes</b>. Total
+                arena game time is set by the admin (currently <b>{configuredGameMinutes} minutes</b>).
+              </li>
+              <li>
+                <b>Field Note Hints &amp; Tie-Breaker:</b> Each case offers 2 hints at <b>-5 PTS</b>{' '}
+                each. Identical total scores are ranked by faster completion time and fewer hint
+                penalties.
+              </li>
+            </ul>
+          </article>
+        </div>
+
+        <div className="rules-card">
+          <div className="rules-card-head">
+            <span className="rules-num">04</span>
+            <strong>Fair Play &amp; Event Conduct</strong>
+          </div>
+          <ul className="rules-list rules-list-two-col">
+            <li>
+              <b>No External Attacks:</b> This is a fictional training environment. Attempting to
+              inspect page source code for answers, brute-force endpoints, or test findings against
+              the hosting server results in immediate disqualification.
+            </li>
+            <li>
+              <b>No Cross-Team Sharing:</b> Sharing answers, timeline sequences, or evidence
+              interpretations with other competing teams is strictly prohibited.
+            </li>
+            <li>
+              <b>Single Player Active Session:</b> Only one player plays per registered team from a
+              single browser session. Refreshing or opening multiple tabs simultaneously may reset
+              unsaved timeline progress.
+            </li>
+            <li>
+              <b>Organizer Authority:</b> In the event of any technical dispute or scoring
+              discrepancy, the decision of the <b>Avon Event Coordinators</b> will be final.
+            </li>
+          </ul>
+        </div>
+
+        <div className="rules-tip-callout">
+          <Lightbulb size={16} />
+          <div>
+            <strong>Quick Investigator Tip:</strong> Start by comparing timestamps and IP/MAC
+            identifiers in the <em>Evidence</em> tab against each suspect&apos;s alibi, then use the
+            single anchor timestamp in the <em>Sequence Reconstruction</em> panel to order the
+            remaining events.
+          </div>
+        </div>
+      </section>
+
+      <section className="section-block announcement-section">
+        <div className="section-heading">
+          <div>
+            <div className="eyebrow">ARENA DISPATCHES</div>
+            <h2>Latest intel</h2>
+          </div>
+          <Bell size={16} />
+        </div>
+        {announcements.length ? (
+          announcements.map((item) => (
+            <article className="dispatch" key={item.id}>
               <span className="dispatch-dot" />
               <div>
-                <strong>All channels quiet</strong>
-                <p>New event announcements will appear here.</p>
-                <small>STANDING BY</small>
+                <strong>{item.title}</strong>
+                <p>{item.message}</p>
+                <small>{formatAnnouncementDate(item.createdAt)}</small>
               </div>
+            </article>
+          ))
+        ) : (
+          <div className="dispatch empty-dispatch">
+            <span className="dispatch-dot" />
+            <div>
+              <strong>All channels quiet</strong>
+              <p>New event announcements will appear here.</p>
+              <small>STANDING BY</small>
             </div>
-          )}
-          <div className="slogan-line">
-            <Sparkles size={14} /> EVERY CLUE MATTERS · EVERY DECISION COUNTS
           </div>
-        </section>
-      </div>
+        )}
+        <div className="slogan-line">
+          <Sparkles size={14} /> EVERY CLUE MATTERS · EVERY DECISION COUNTS
+        </div>
+      </section>
     </>
   );
 }
@@ -2338,6 +2474,7 @@ function InvestigationView({
   timer,
   caseExpired,
   gameTimer,
+  configuredGameMinutes,
   gameExpired,
   result,
   submitCase,
@@ -2357,6 +2494,7 @@ function InvestigationView({
   timer: string;
   caseExpired: boolean;
   gameTimer: string;
+  configuredGameMinutes: number;
   gameExpired: boolean;
   result: CaseScore | null;
   submitCase: (e: FormEvent) => void;
@@ -2395,7 +2533,7 @@ function InvestigationView({
           <div className={`case-timer ${gameExpired ? 'is-expired' : ''}`}>
             <Clock3 size={15} />
             <strong>{gameTimer}</strong>
-            <small>{gameExpired ? 'GAME ENDED' : 'GAME · 30 MIN'}</small>
+            <small>{gameExpired ? 'GAME ENDED' : `GAME · ${configuredGameMinutes} MIN`}</small>
           </div>
         </div>
       </div>
@@ -2587,7 +2725,7 @@ function InvestigationView({
                     maxLength={500}
                     value={report}
                     onChange={(event) => setReport(event.target.value)}
-                    placeholder="Identify the culprit and summarize the key clues and technical evidence that prove your verdict (50% of score)."
+                    placeholder="Name the single culprit and summarize what they did (multiple culprit names reduce points · 50% of score)."
                   />
                 </label>
 
@@ -2629,7 +2767,7 @@ function InvestigationView({
                 </div>
                 <div>
                   <span>CASE / GAME LIMIT</span>
-                  <strong>{activeCase.duration} MIN / 30 MIN</strong>
+                  <strong>{activeCase.duration} MIN / {configuredGameMinutes} MIN</strong>
                 </div>
                 <div>
                   <span>SCORING SPLIT</span>
@@ -3052,6 +3190,7 @@ function HistoryView({
 function AdminView({
   admin,
   hasLiveEvent,
+  configuredGameMinutes,
   games,
   leaderboard,
   exportResults,
@@ -3063,6 +3202,7 @@ function AdminView({
 }: {
   admin: boolean;
   hasLiveEvent: boolean;
+  configuredGameMinutes: number;
   games: GameLobby[];
   leaderboard: RankingEntry[];
   exportResults: () => void;
@@ -3073,12 +3213,17 @@ function AdminView({
   refreshArenaData: () => Promise<void>;
 }) {
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
+  const [durationInput, setDurationInput] = useState<string>(String(configuredGameMinutes));
   const [launchBusy, setLaunchBusy] = useState(false);
   const [announceBusy, setAnnounceBusy] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [unlockError, setUnlockError] = useState('');
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
+
+  useEffect(() => {
+    setDurationInput(String(configuredGameMinutes));
+  }, [configuredGameMinutes]);
 
   const handleAdminError = useCallback(
     (error: unknown, fallback: string) => {
@@ -3122,6 +3267,43 @@ function AdminView({
     }
   };
 
+  const applyGameDurationAndGoLive = async (minutes: number, announcementLabel: string) => {
+    const mins = clampGameDurationMinutes(minutes);
+    const gameTitle = `Cyber Mystery Arena (${mins}m)`;
+    const existingNonEnded = games.find((game) => game.status !== 'ended');
+    const matchingExisting =
+      existingNonEnded && parseDurationMinutesFromGame(existingNonEnded) === mins
+        ? existingNonEnded
+        : null;
+
+    if (matchingExisting) {
+      await invoke('adminSetGameStatus', {
+        gameId: matchingExisting.id,
+        status: 'live',
+        durationMinutes: mins,
+        name: gameTitle,
+      });
+    } else {
+      const created = await invoke<GameLobby>('adminCreateGame', {
+        name: gameTitle,
+        caseId: cases[0].id,
+        inviteCode: '',
+        durationMinutes: mins,
+      });
+      await invoke('adminSetGameStatus', {
+        gameId: created.id,
+        status: 'live',
+        durationMinutes: mins,
+        name: gameTitle,
+      });
+      const olderGames = games.filter((game) => game.id !== created.id && game.status !== 'ended');
+      await Promise.all(
+        olderGames.map((game) => invoke('adminSetGameStatus', { gameId: game.id, status: 'ended' }))
+      );
+    }
+    setDurationInput(String(mins));
+    setNotice(announcementLabel.replace('{mins}', String(mins)));
+  };
 
   const toggleArenaLaunch = async () => {
     setLaunchBusy(true);
@@ -3133,18 +3315,11 @@ function AdminView({
         );
         setNotice('Game paused. Case files are now hidden from participants.');
       } else {
-        const candidate = games.find((game) => game.status !== 'ended');
-        if (candidate) {
-          await invoke('adminSetGameStatus', { gameId: candidate.id, status: 'live' });
-        } else {
-          const created = await invoke<GameLobby>('adminCreateGame', {
-            name: 'Cyber Mystery Arena Live',
-            caseId: cases[0].id,
-            inviteCode: '',
-          });
-          await invoke('adminSetGameStatus', { gameId: created.id, status: 'live' });
-        }
-        setNotice('Game started! All 30 case files are now unlocked for participants.');
+        const mins = clampGameDurationMinutes(durationInput, configuredGameMinutes);
+        await applyGameDurationAndGoLive(
+          mins,
+          'Game started ({mins} min)! All 30 case files are now unlocked for participants.'
+        );
       }
       await refreshArenaData();
     } catch (error) {
@@ -3153,6 +3328,25 @@ function AdminView({
       setLaunchBusy(false);
     }
   };
+
+  const updateLiveDuration = async () => {
+    const mins = clampGameDurationMinutes(durationInput, configuredGameMinutes);
+    setLaunchBusy(true);
+    try {
+      await applyGameDurationAndGoLive(
+        mins,
+        'Total game time updated to {mins} minutes across all connected participants.'
+      );
+      await refreshArenaData();
+    } catch (error) {
+      handleAdminError(error, 'Unable to update total game time.');
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
+
+  const parsedDurationInput = clampGameDurationMinutes(durationInput, configuredGameMinutes);
+  const durationPresets = [15, 30, 45, 60, 90];
 
   const publishAnnouncement = async (event: FormEvent) => {
     event.preventDefault();
@@ -3204,7 +3398,7 @@ function AdminView({
       <PageHeading
         eyebrow="RESTRICTED · ADMINISTRATOR ACCESS"
         title="Arena control room"
-        description="Manage live game access, teams, and announcements. Case answers and score validation remain server-controlled."
+        description="Manage live game access, total game time, teams, and announcements. Case answers and score validation remain server-controlled."
         action={
           <div className="admin-header-actions">
             <button className="button button-outline" onClick={exportResults}>
@@ -3226,30 +3420,74 @@ function AdminView({
           </div>
           <h2>
             {hasLiveEvent
-              ? 'All 30 case files are visible to participants'
-              : 'Case files are hidden until you start the game'}
+              ? `All 30 case files are visible (${configuredGameMinutes} min game)`
+              : `Set total game time (${parsedDurationInput} min) and start`}
           </h2>
           <p>
             {hasLiveEvent
-              ? 'Participants can browse Play Investigation and solve cases.'
-              : 'Click Start Game to unlock Play Investigation and show all cases to participants.'}
+              ? `Participants have ${configuredGameMinutes} minutes total (5 min per case). You can adjust total time below anytime.`
+              : 'Choose the total arena duration in minutes, then click Start game to unlock all cases.'}
           </p>
         </div>
-        <button
-          type="button"
-          className={`button ${hasLiveEvent ? 'button-outline' : 'button-primary'}`}
-          disabled={launchBusy}
-          onClick={() => void toggleArenaLaunch()}
-        >
-          {hasLiveEvent ? <Clock3 size={15} /> : <Zap size={15} />}
-          <span>
-            {launchBusy
-              ? 'Updating...'
-              : hasLiveEvent
-              ? 'Pause game & hide cases'
-              : 'Start game & show all cases'}
-          </span>
-        </button>
+        <div className="admin-launch-controls">
+          <div className="admin-duration-row">
+            <div className="admin-duration-field">
+              <label htmlFor="admin-game-duration">GAME TIME</label>
+              <input
+                id="admin-game-duration"
+                type="number"
+                min={1}
+                max={300}
+                value={durationInput}
+                onChange={(event) => setDurationInput(event.target.value)}
+                onBlur={() => setDurationInput(String(clampGameDurationMinutes(durationInput, configuredGameMinutes)))}
+                aria-label="Total game duration in minutes"
+              />
+              <span>min</span>
+            </div>
+            <div className="admin-duration-presets" role="group" aria-label="Quick game duration presets">
+              {durationPresets.map((mins) => (
+                <button
+                  key={mins}
+                  type="button"
+                  className={`admin-preset-btn ${parsedDurationInput === mins ? 'is-active' : ''}`}
+                  onClick={() => setDurationInput(String(mins))}
+                >
+                  {mins}m
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="admin-launch-buttons">
+            {hasLiveEvent && (
+              <button
+                type="button"
+                className="button button-primary"
+                disabled={launchBusy || parsedDurationInput === configuredGameMinutes}
+                onClick={() => void updateLiveDuration()}
+              >
+                <Clock3 size={15} />
+                <span>{launchBusy ? 'Updating...' : `Update time (${parsedDurationInput}m)`}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className={`button ${hasLiveEvent ? 'button-outline' : 'button-primary'}`}
+              disabled={launchBusy}
+              onClick={() => void toggleArenaLaunch()}
+            >
+              {hasLiveEvent ? <Clock3 size={15} /> : <Zap size={15} />}
+              <span>
+                {launchBusy
+                  ? 'Updating...'
+                  : hasLiveEvent
+                  ? 'Pause game & hide cases'
+                  : `Start game (${parsedDurationInput}m)`}
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div className="admin-metrics">
