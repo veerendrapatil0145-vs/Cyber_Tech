@@ -4,7 +4,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { Request, Response } from 'express';
-import { caseAnswerKeys } from './server/caseAnswers.ts';
+import { caseAnswerKeys, gradeCaseVerdict } from './server/caseAnswers.ts';
 
 dotenv.config();
 
@@ -19,13 +19,15 @@ interface TeamRecord {
 
 interface CaseScoreRecord {
   score: number;
+  sequenceScore?: number;
+  summaryScore?: number;
   hintsUsed: number;
   elapsedSeconds: number;
   submittedAt: string;
   timelineMatches: number;
   totalTimeline: number;
-  keyCluesFound: number;
-  totalKeyClues: number;
+  keyCluesFound?: number;
+  totalKeyClues?: number;
   explanations: Array<{
     title: string;
     correct: boolean;
@@ -353,27 +355,9 @@ async function startServer() {
     }
 
     if (action === 'joinTeam') {
-      const code =
-        typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
-      const targetTeam = db.teams.find((team) => team.inviteCode === code);
-      if (!targetTeam) {
-        res.status(404).json({ error: 'No team found with that invitation code.' });
-        return;
-      }
-      if (!targetTeam.memberIds.includes(playerId)) {
-        if (targetTeam.memberIds.length >= 4) {
-          res.status(400).json({ error: 'This team already has the maximum 4 members.' });
-          return;
-        }
-        targetTeam.memberIds.push(playerId);
-        const ranking = db.rankings.find((entry) => entry.teamId === targetTeam.id);
-        if (ranking && !ranking.memberIds.includes(playerId)) {
-          ranking.memberIds.push(playerId);
-        }
-        await persistDb(db);
-        broadcastEvent('state', buildPublicState(db, false));
-      }
-      res.json(targetTeam);
+      res.status(403).json({
+        error: 'Only one player can play per team. Invite codes are disabled.',
+      });
       return;
     }
 
@@ -403,7 +387,7 @@ async function startServer() {
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
       const team = findTeamForPlayer(db, playerId, requestedTeamId);
       if (!team) {
-        res.status(403).json({ error: 'Register or join a team before starting an investigation.' });
+        res.status(403).json({ error: 'Register a team before starting an investigation.' });
         return;
       }
       if (!caseAnswerKeys[caseId]) {
@@ -486,7 +470,8 @@ async function startServer() {
         res.status(404).json({ error: 'Start the investigation before requesting a hint.' });
         return;
       }
-      if (session.hintsUsed < 3) {
+      const maxHints = caseAnswerKeys[caseId]?.maxHints ?? 2;
+      if (session.hintsUsed < maxHints) {
         session.hintsUsed += 1;
         session.lastWriter = playerId;
         await persistDb(db);
@@ -501,7 +486,7 @@ async function startServer() {
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
       const team = findTeamForPlayer(db, playerId, requestedTeamId);
       if (!team) {
-        res.status(403).json({ error: 'Register or join a team before submitting a verdict.' });
+        res.status(403).json({ error: 'Register a team before submitting a verdict.' });
         return;
       }
 
@@ -524,12 +509,10 @@ async function startServer() {
         return;
       }
 
-      const selectedEvidence = Array.isArray(payload.selectedEvidence)
-        ? payload.selectedEvidence.filter((item): item is number => typeof item === 'number')
-        : [];
       const timelineOrder = Array.isArray(payload.timelineOrder)
         ? payload.timelineOrder.filter((item): item is string => typeof item === 'string')
         : [];
+      const reportText = typeof payload.report === 'string' ? payload.report : '';
 
       const session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
       const hintsUsed = session?.hintsUsed ?? 0;
@@ -537,58 +520,22 @@ async function startServer() {
         ? Math.max(1, Math.floor((Date.now() - session.startedAt) / 1000))
         : 60;
 
-      let timelineMatches = 0;
-      for (let i = 0; i < answerKey.correctTimeline.length; i += 1) {
-        if (timelineOrder[i] === answerKey.correctTimeline[i]) {
-          timelineMatches += 1;
-        }
+      const graded = gradeCaseVerdict(caseId, timelineOrder, reportText, hintsUsed, elapsedSeconds);
+      if (!graded) {
+        res.status(404).json({ error: 'Case answer key not found.' });
+        return;
       }
-      const hasKeyEvidence = answerKey.keyEvidenceIndices.length > 0;
-      const timelinePoints =
-        (timelineMatches / answerKey.correctTimeline.length) * (hasKeyEvidence ? 60 : 100);
-
-      const keyHits = answerKey.keyEvidenceIndices.filter((idx) =>
-        selectedEvidence.includes(idx)
-      ).length;
-      const evidencePoints = hasKeyEvidence
-        ? (keyHits / answerKey.keyEvidenceIndices.length) * 40
-        : 0;
-
-      const rawScore = Math.round(timelinePoints + evidencePoints - hintsUsed * 5);
-      const finalScore = Math.max(0, Math.min(100, rawScore));
-
-      const explanations = [
-        {
-          title: 'Chronological timeline reconstruction',
-          correct: timelineMatches === answerKey.correctTimeline.length,
-          explanation: `${timelineMatches} of ${answerKey.correctTimeline.length} events placed in exact chronological order.`,
-        },
-        ...(hasKeyEvidence
-          ? [
-              {
-                title: 'Critical forensic clues collected',
-                correct: keyHits === answerKey.keyEvidenceIndices.length,
-                explanation: `${keyHits} of ${answerKey.keyEvidenceIndices.length} primary clues locked into evidence.`,
-              },
-            ]
-          : []),
-        ...answerKey.debriefNotes.map((note, idx) => ({
-          title: `Forensic finding 0${idx + 1}`,
-          correct: true,
-          explanation: note,
-        })),
-      ];
 
       const caseResult: CaseScoreRecord = {
-        score: finalScore,
-        hintsUsed,
-        elapsedSeconds,
-        submittedAt: new Date().toISOString(),
-        timelineMatches,
-        totalTimeline: answerKey.correctTimeline.length,
-        keyCluesFound: keyHits,
-        totalKeyClues: answerKey.keyEvidenceIndices.length,
-        explanations,
+        score: graded.score,
+        sequenceScore: graded.sequenceScore,
+        summaryScore: graded.summaryScore,
+        hintsUsed: graded.hintsUsed,
+        elapsedSeconds: graded.elapsedSeconds,
+        submittedAt: graded.submittedAt,
+        timelineMatches: graded.timelineMatches,
+        totalTimeline: graded.totalTimeline,
+        explanations: graded.explanations,
       };
 
       if (!ranking) {
@@ -599,8 +546,8 @@ async function startServer() {
           ownerId: team.ownerId,
           memberIds: [...team.memberIds],
           mode: 'Team',
-          score: finalScore,
-          elapsedSeconds,
+          score: graded.score,
+          elapsedSeconds: graded.elapsedSeconds,
           caseScores: { [caseId]: caseResult },
           updatedAt: new Date().toISOString(),
         };
@@ -635,7 +582,7 @@ async function startServer() {
       res.json({
         ...caseResult,
         rank,
-        message: `Scored ${timelineMatches}/${answerKey.correctTimeline.length} timeline positions and ${keyHits}/${answerKey.keyEvidenceIndices.length} key clues.`,
+        message: graded.message,
       });
       return;
     }
@@ -676,7 +623,7 @@ async function startServer() {
 
       if (action === 'adminCreateGame') {
         const name = typeof payload.name === 'string' ? payload.name.trim() : '';
-        const caseId = typeof payload.caseId === 'string' ? payload.caseId : 'shadow-trace';
+        const caseId = typeof payload.caseId === 'string' ? payload.caseId : 'case-01';
         const rawCode =
           typeof payload.inviteCode === 'string' ? payload.inviteCode.trim().toUpperCase() : '';
         const inviteCode = rawCode || generateInviteCode(6);
@@ -760,7 +707,6 @@ async function startServer() {
           teams: db.teams.map((team) => ({
             id: team.id,
             name: team.name,
-            inviteCode: team.inviteCode,
             memberCount: team.memberIds.length,
             createdAt: team.createdAt,
           })),

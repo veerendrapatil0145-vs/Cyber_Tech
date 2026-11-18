@@ -11,7 +11,6 @@ import {
   CircleHelp,
   Clock3,
   Code2,
-  Copy,
   Database,
   Eye,
   FileText,
@@ -43,7 +42,9 @@ import {
   Zap,
 } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
+import * as XLSX from 'xlsx';
 import { cases, type InvestigationCase } from './cases';
+import { gradeCaseVerdictLocally } from './caseAnswerFallback';
 import { isAdminUser, supabase, supabaseConfigured } from './supabase.js';
 
 type PageName =
@@ -58,11 +59,16 @@ type PageName =
 interface TeamInfo {
   id: string;
   name: string;
-  inviteCode: string;
+  inviteCode?: string;
 }
 
 interface CaseScore {
   score: number;
+  sequenceScore?: number;
+  summaryScore?: number;
+  timelineMatches?: number;
+  totalTimeline?: number;
+  submittedSummary?: string;
   hintsUsed?: number;
   elapsedSeconds?: number;
   rank?: number;
@@ -76,6 +82,7 @@ interface CaseScore {
 
 interface RankingEntry {
   id: string;
+  teamId?: string;
   teamName?: string;
   memberIds?: string[];
   ownerId?: string;
@@ -132,6 +139,31 @@ const iconByName = {
   sun: Sun,
 } as const;
 
+const GAME_DURATION_SECONDS = 30 * 60;
+
+interface LocalSessionRecord {
+  startedAt: number;
+  hintsUsed: number;
+  completed: boolean;
+  progress: {
+    report: string;
+    selectedEvidence: number[];
+    timelineOrder: string[];
+  };
+}
+
+function isMissingRemoteCaseError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('case file not found') ||
+    lower.includes('case answer key not found') ||
+    lower.includes('start the investigation first') ||
+    lower.includes('sessions') ||
+    lower.includes('schema cache') ||
+    lower.includes('pgrst205')
+  );
+}
+
 function stored<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -139,6 +171,11 @@ function stored<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function formatClock(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
 }
 
 function playSignal(muted: boolean, frequency = 620) {
@@ -165,6 +202,7 @@ function playSignal(muted: boolean, frequency = 620) {
 
 const mapRanking = (row: Record<string, unknown>): RankingEntry => ({
   ...(row as unknown as RankingEntry),
+  teamId: (row.team_id as string) ?? (row.teamId as string),
   teamName: (row.team_name as string) ?? (row.teamName as string),
   memberIds: (row.member_ids as string[]) ?? (row.memberIds as string[]),
   ownerId: (row.owner_id as string) ?? (row.ownerId as string),
@@ -221,6 +259,7 @@ export default function App() {
   const [selectedEvidence, setSelectedEvidence] = useState<number[]>([]);
   const [timelineOrder, setTimelineOrder] = useState<string[]>([]);
   const [hintCount, setHintCount] = useState(0);
+  const [hintBusy, setHintBusy] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<CaseScore | null>(null);
@@ -230,18 +269,25 @@ export default function App() {
   const [teamBusy, setTeamBusy] = useState(false);
   const [teamLoading, setTeamLoading] = useState(false);
   const [leaderboard, setLeaderboard] = useState<RankingEntry[]>([]);
+  const [localRankings, setLocalRankings] = useState<Record<string, Record<string, CaseScore>>>(() =>
+    stored<Record<string, Record<string, CaseScore>>>('arena-local-rankings', {})
+  );
   const [games, setGames] = useState<GameLobby[]>([]);
   const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [registeredCount, setRegisteredCount] = useState<number | null>(null);
   const [teamName, setTeamName] = useState('');
-  const [teamCode, setTeamCode] = useState('');
   const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(null);
-  const [joinCode, setJoinCode] = useState('');
+  const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+  const [gameElapsed, setGameElapsed] = useState(0);
+  const caseFallbackRef = useRef(false);
+  const submittingLockRef = useRef(false);
+  const autoClosedCaseKeyRef = useRef<string | null>(null);
+  const finalizeSubmissionRef = useRef<(isAutoExpired?: boolean) => Promise<void>>(async () => {});
+  const mainRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState('');
   const [theme, setTheme] = useState<'dark' | 'light'>(() => stored('arena-theme', 'dark'));
   const [muted, setMuted] = useState<boolean>(() => stored('arena-muted', true));
   const [mobileMenu, setMobileMenu] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -717,6 +763,29 @@ export default function App() {
   }, [user, teamInfo, useLocalBackend]);
 
   useEffect(() => {
+    if (!teamInfo) {
+      setGameStartedAt(null);
+      setGameElapsed(0);
+      return undefined;
+    }
+    const existing = stored<number | null>(`arena-game-start-${teamInfo.id}`, null);
+    if (existing) {
+      setGameStartedAt(existing);
+      setGameElapsed(Math.max(0, Math.floor((Date.now() - existing) / 1000)));
+    }
+    return undefined;
+  }, [teamInfo]);
+
+  useEffect(() => {
+    if (!gameStartedAt) return undefined;
+    setGameElapsed(Math.max(0, Math.floor((Date.now() - gameStartedAt) / 1000)));
+    const ticker = window.setInterval(() => {
+      setGameElapsed(Math.max(0, Math.floor((Date.now() - gameStartedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(ticker);
+  }, [gameStartedAt]);
+
+  useEffect(() => {
     if (!activeCase) return undefined;
     const progress = {
       caseId: activeCase.id,
@@ -726,6 +795,19 @@ export default function App() {
       hintCount,
     };
     localStorage.setItem('arena-progress', JSON.stringify(progress));
+    if (caseFallbackRef.current && teamInfo) {
+      const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+      const key = `${teamInfo.id}:${activeCase.id}`;
+      const existing = sessions[key];
+      if (existing && !existing.completed) {
+        sessions[key] = {
+          ...existing,
+          progress: { report, selectedEvidence, timelineOrder },
+        };
+        localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+      }
+      return undefined;
+    }
     if (!sessionReady || !user || result) return undefined;
     const timeout = window.setTimeout(() => {
       void invoke('saveInvestigationProgress', {
@@ -754,56 +836,128 @@ export default function App() {
     localStorage.setItem('arena-muted', JSON.stringify(muted));
   }, [muted]);
 
+  const effectiveLeaderboard = useMemo(() => {
+    const merged = leaderboard.map((entry) => ({
+      ...entry,
+      caseScores: { ...(entry.caseScores || {}) },
+    }));
+    for (const [tId, extraScores] of Object.entries(localRankings)) {
+      let target = merged.find(
+        (entry) =>
+          entry.teamId === tId ||
+          entry.id === `local_${tId}` ||
+          entry.id === `team_${tId}` ||
+          (teamInfo && tId === teamInfo.id && user?.id && entry.memberIds?.includes(user.id))
+      );
+      if (!target && teamInfo && teamInfo.id === tId) {
+        target = {
+          id: `local_${tId}`,
+          teamId: tId,
+          teamName: teamInfo.name,
+          memberIds: user?.id ? [user.id] : [],
+          ownerId: user?.id,
+          mode: 'Team',
+          score: 0,
+          elapsedSeconds: 0,
+          caseScores: {},
+        };
+        merged.push(target);
+      }
+      if (target) {
+        for (const [cId, cScore] of Object.entries(extraScores)) {
+          if (!Object.hasOwn(target.caseScores || {}, cId)) {
+            target.caseScores![cId] = cScore;
+          }
+        }
+        const values = Object.values(target.caseScores || {});
+        target.score = values.reduce((sum, item) => sum + (item.score || 0), 0);
+        target.elapsedSeconds = values.reduce((sum, item) => sum + (item.elapsedSeconds || 0), 0);
+      }
+    }
+    return merged.sort((a, b) => {
+      if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+      return (a.elapsedSeconds || 0) - (b.elapsedSeconds || 0);
+    });
+  }, [leaderboard, localRankings, teamInfo, user?.id]);
+
   const completed = useMemo(() => {
     const localCompleted = stored<string[]>('arena-completed', []);
-    const teamRanking = leaderboard.find(
+    const teamRanking = effectiveLeaderboard.find(
       (score) => score.mode === 'Team' && (user?.id ? score.memberIds?.includes(user.id) : false)
     );
     const serverClosed = teamRanking ? Object.keys(teamRanking.caseScores || {}) : [];
-    return [...new Set([...localCompleted, ...serverClosed])];
-  }, [leaderboard, user, result]);
+    const localTeamClosed = teamInfo ? Object.keys(localRankings[teamInfo.id] || {}) : [];
+    return [...new Set([...localCompleted, ...serverClosed, ...localTeamClosed])];
+  }, [effectiveLeaderboard, localRankings, teamInfo, user, result]);
 
   const filteredScores = useMemo(
     () =>
-      leaderboard.filter(
+      effectiveLeaderboard.filter(
         (score) =>
           score.mode === 'Team' &&
           `${score.teamName || ''}`.toLowerCase().includes(search.toLowerCase())
       ),
-    [leaderboard, search]
+    [effectiveLeaderboard, search]
   );
 
-  const teamScore =
-    leaderboard.find(
-      (score) => score.mode === 'Team' && (user?.id ? score.memberIds?.includes(user.id) : false)
-    )?.score ?? 0;
+  const teamRankings = useMemo(
+    () => effectiveLeaderboard.filter((score) => score.mode === 'Team'),
+    [effectiveLeaderboard]
+  );
 
-  const myRank =
-    leaderboard
-      .filter((score) => score.mode === 'Team')
-      .findIndex(
-        (score) =>
-          user?.id && (score.ownerId === user.id || score.memberIds?.includes(user.id))
-      ) + 1;
+  const myTeamIndex = teamRankings.findIndex(
+    (score) =>
+      score.teamId === teamInfo?.id ||
+      score.id === `local_${teamInfo?.id}` ||
+      (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false)
+  );
+
+  const myRank = myTeamIndex >= 0 ? myTeamIndex + 1 : 0;
+  const myTeamEntry = myTeamIndex >= 0 ? teamRankings[myTeamIndex] : null;
+  const teamScore = myTeamEntry?.score ?? 0;
 
   const secondsRemaining = Math.max(0, (activeCase?.duration || 0) * 60 - elapsed);
-  const timer = `${String(Math.floor(secondsRemaining / 60)).padStart(2, '0')}:${String(
-    secondsRemaining % 60
-  ).padStart(2, '0')}`;
+  const timer = formatClock(secondsRemaining);
+  const gameSecondsRemaining = gameStartedAt
+    ? Math.max(0, GAME_DURATION_SECONDS - gameElapsed)
+    : GAME_DURATION_SECONDS;
+  const gameTimer = formatClock(gameSecondsRemaining);
 
 
 
-  const openCase = async (gameCase: InvestigationCase) => {
+  const ensureLocalSession = useCallback(
+    (caseId: string): LocalSessionRecord => {
+      const teamKey = teamInfo?.id || 'solo';
+      const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+      const sessionKey = `${teamKey}:${caseId}`;
+      if (!sessions[sessionKey]) {
+        sessions[sessionKey] = {
+          startedAt: Date.now(),
+          hintsUsed: 0,
+          completed: false,
+          progress: { report: '', selectedEvidence: [], timelineOrder: [] },
+        };
+        localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+      }
+      return sessions[sessionKey];
+    },
+    [teamInfo?.id]
+  );
+
+  const openCase = async (gameCase: InvestigationCase, bypassGateCheck = false) => {
     if (!teamInfo) {
-      setNotice('Register or join a team before starting an investigation.');
+      setNotice('Register a team before starting an investigation.');
       return;
     }
-    const previousScore = leaderboard.find(
+    const previousScore = effectiveLeaderboard.find(
       (score) =>
         Object.hasOwn(score.caseScores || {}, gameCase.id) &&
-        (user?.id ? score.memberIds?.includes(user.id) : false)
+        (score.teamId === teamInfo.id ||
+          score.id === `local_${teamInfo.id}` ||
+          (user?.id ? score.memberIds?.includes(user.id) : false))
     );
     if (previousScore) {
+      scrollPageToTop();
       setActiveCase(gameCase);
       setPage('Investigation');
       setResult({
@@ -811,15 +965,34 @@ export default function App() {
         message: 'This case is already closed. Your verified result is shown below.',
       });
       setSessionReady(false);
+      setNotice('');
       return;
     }
+    if (!hasLiveEvent && !bypassGateCheck) {
+      setNotice('Cases are locked until the admin starts the game.');
+      return;
+    }
+    if (gameStartedAt && gameSecondsRemaining <= 0) {
+      setNotice('The 30-minute arena game clock has ended.');
+      return;
+    }
+    if (!gameStartedAt) {
+      const now = Date.now();
+      localStorage.setItem(`arena-game-start-${teamInfo.id}`, JSON.stringify(now));
+      setGameStartedAt(now);
+      setGameElapsed(0);
+    }
+
+    autoClosedCaseKeyRef.current = null;
     const localProgress = stored<{
       caseId?: string;
       report?: string;
       selectedEvidence?: number[];
       timelineOrder?: string[];
+      hintCount?: number;
     } | null>('arena-progress', null);
     const resumeLocal = localProgress?.caseId === gameCase.id ? localProgress : null;
+    caseFallbackRef.current = false;
     setActiveCase(gameCase);
     setPage('Investigation');
     setSessionReady(false);
@@ -828,7 +1001,7 @@ export default function App() {
     setTimelineOrder(
       resumeLocal?.timelineOrder?.length ? resumeLocal.timelineOrder : [...gameCase.timeline]
     );
-    setHintCount(0);
+    setHintCount(resumeLocal?.hintCount || 0);
     setElapsed(0);
     setResult(null);
     setNotice('');
@@ -862,7 +1035,24 @@ export default function App() {
       setSessionReady(true);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unable to start investigation.';
-      if (msg.includes('sessions') || msg.includes('schema cache') || msg.includes('PGRST205')) {
+      if (isMissingRemoteCaseError(msg)) {
+        caseFallbackRef.current = true;
+        const localSess = ensureLocalSession(gameCase.id);
+        const hasSaved =
+          (localSess.progress?.selectedEvidence?.length || 0) > 0 ||
+          Boolean(localSess.progress?.report) ||
+          (localSess.progress?.timelineOrder?.length || 0) > 0;
+        if (hasSaved) {
+          setReport(localSess.progress.report || '');
+          setSelectedEvidence(localSess.progress.selectedEvidence || []);
+          setTimelineOrder(
+            localSess.progress.timelineOrder?.length
+              ? localSess.progress.timelineOrder
+              : [...gameCase.timeline]
+          );
+        }
+        setHintCount(localSess.hintsUsed || 0);
+        setElapsed(Math.max(0, Math.floor((Date.now() - localSess.startedAt) / 1000)));
         setSessionReady(true);
       } else {
         setNotice(msg);
@@ -870,8 +1060,29 @@ export default function App() {
     }
   };
 
+  const applyLocalHint = (caseObj: InvestigationCase) => {
+    const teamKey = teamInfo?.id || 'solo';
+    const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+    const sessionKey = `${teamKey}:${caseObj.id}`;
+    const current = sessions[sessionKey] || ensureLocalSession(caseObj.id);
+    const nextHints = Math.min(caseObj.hints.length, (current.hintsUsed || hintCount || 0) + 1);
+    sessions[sessionKey] = {
+      ...current,
+      hintsUsed: nextHints,
+    };
+    localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+    setHintCount(nextHints);
+    setNotice('');
+    playSignal(muted, 480);
+  };
+
   const requestHint = async () => {
-    if (!activeCase || hintCount >= activeCase.hints.length) return;
+    if (!activeCase || hintCount >= activeCase.hints.length || hintBusy) return;
+    if (caseFallbackRef.current) {
+      applyLocalHint(activeCase);
+      return;
+    }
+    setHintBusy(true);
     try {
       const response = await invoke<{ hintsUsed: number }>('useInvestigationHint', {
         caseId: activeCase.id,
@@ -881,42 +1092,137 @@ export default function App() {
       playSignal(muted, 480);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unable to unlock hint.';
-      if (msg.includes('sessions') || msg.includes('schema cache') || msg.includes('PGRST205')) {
-        setHintCount((prev) => Math.min(activeCase.hints.length, prev + 1));
-        playSignal(muted, 480);
+      if (isMissingRemoteCaseError(msg)) {
+        caseFallbackRef.current = true;
+        applyLocalHint(activeCase);
       } else {
         setNotice(msg);
       }
+    } finally {
+      setHintBusy(false);
     }
   };
 
-  const submitCase = async (event: FormEvent) => {
-    event.preventDefault();
+  const recordLocalVerdict = (caseObj: InvestigationCase, scoreData: CaseScore) => {
+    const teamKey = teamInfo?.id || 'solo';
+    const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+    const sessionKey = `${teamKey}:${caseObj.id}`;
+    if (sessions[sessionKey]) {
+      sessions[sessionKey].completed = true;
+      localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+    }
+    setLocalRankings((prev) => {
+      const next = {
+        ...prev,
+        [teamKey]: {
+          ...(prev[teamKey] || {}),
+          [caseObj.id]: scoreData,
+        },
+      };
+      localStorage.setItem('arena-local-rankings', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const finalizeSubmission = async (isAutoExpired = false) => {
+    if (submittingLockRef.current) return;
     if (!teamInfo || !activeCase) {
-      setNotice('Register or join a team before submitting a verdict.');
+      setNotice('Register a team before submitting a verdict.');
       return;
     }
+    const targetCase = activeCase;
+    submittingLockRef.current = true;
     setSubmissionBusy(true);
     setNotice('');
-    try {
-      const response = await invoke<CaseScore>('submitInvestigation', {
-        caseId: activeCase.id,
-        selectedEvidence,
-        timelineOrder,
-        report,
-        teamId: teamInfo?.id || null,
-      });
-      setResult(response);
-      playSignal(muted, 760);
-      const nextCompleted = [...new Set([...completed, activeCase.id])];
+
+    const finishWithResult = (scorePayload: CaseScore) => {
+      const enriched: CaseScore = {
+        ...scorePayload,
+        submittedSummary: report.trim() || scorePayload.submittedSummary || '',
+      };
+      playSignal(muted, isAutoExpired ? 420 : 760);
+      const nextCompleted = [...new Set([...completed, targetCase.id])];
       localStorage.setItem('arena-completed', JSON.stringify(nextCompleted));
       localStorage.removeItem('arena-progress');
-      setNotice('Verdict submitted and verified by the arena server.');
+      setResult(enriched);
+      setSessionReady(false);
+      setNotice(
+        isAutoExpired
+          ? `Time expired (${targetCase.duration}:00) for "${targetCase.title}". Case closed automatically — review your points and answer summary below.`
+          : `Verdict submitted for "${targetCase.title}". Review your points and answer summary below.`
+      );
+    };
+
+    try {
+      if (!caseFallbackRef.current) {
+        const response = await invoke<CaseScore>('submitInvestigation', {
+          caseId: targetCase.id,
+          selectedEvidence,
+          timelineOrder,
+          report,
+          teamId: teamInfo?.id || null,
+        });
+        finishWithResult(response);
+        return;
+      }
+      const fallbackResult = gradeCaseVerdictLocally(
+        targetCase.id,
+        timelineOrder,
+        report,
+        hintCount,
+        elapsed
+      );
+      if (!fallbackResult) {
+        throw new Error('Case answer key not found.');
+      }
+      const storedScore: CaseScore = {
+        ...fallbackResult,
+        submittedSummary: report.trim(),
+      };
+      recordLocalVerdict(targetCase, storedScore);
+      finishWithResult(storedScore);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Submission failed.');
+      const msg = error instanceof Error ? error.message : 'Submission failed.';
+      if (isMissingRemoteCaseError(msg) || isAutoExpired) {
+        caseFallbackRef.current = true;
+        const fallbackResult = gradeCaseVerdictLocally(
+          targetCase.id,
+          timelineOrder,
+          report,
+          hintCount,
+          elapsed
+        );
+        if (fallbackResult) {
+          const storedScore: CaseScore = {
+            ...fallbackResult,
+            submittedSummary: report.trim(),
+          };
+          recordLocalVerdict(targetCase, storedScore);
+          finishWithResult(storedScore);
+          return;
+        }
+      }
+      setNotice(msg);
     } finally {
+      submittingLockRef.current = false;
       setSubmissionBusy(false);
     }
+  };
+
+  finalizeSubmissionRef.current = finalizeSubmission;
+
+  useEffect(() => {
+    if (page !== 'Investigation' || !activeCase || result || !sessionReady || !teamInfo) return;
+    if (elapsed < activeCase.duration * 60) return;
+    const lockKey = `${teamInfo.id}:${activeCase.id}`;
+    if (autoClosedCaseKeyRef.current === lockKey) return;
+    autoClosedCaseKeyRef.current = lockKey;
+    void finalizeSubmissionRef.current(true);
+  }, [page, activeCase, result, sessionReady, teamInfo, elapsed]);
+
+  const submitCase = async (event: FormEvent) => {
+    event.preventDefault();
+    await finalizeSubmission(false);
   };
 
   const createTeam = async (event: FormEvent) => {
@@ -926,41 +1232,10 @@ export default function App() {
     try {
       const data = await invoke<TeamInfo>('createTeam', { name: teamName.trim() });
       setTeamInfo(data);
-      setTeamCode(data.inviteCode);
     } catch (error) {
       setTeamEntryError(error instanceof Error ? error.message : 'Unable to register team.');
     } finally {
       setTeamBusy(false);
-    }
-  };
-
-  const joinTeam = async (event: FormEvent) => {
-    event.preventDefault();
-    setTeamBusy(true);
-    setTeamEntryError('');
-    try {
-      const data = await invoke<TeamInfo>('joinTeam', {
-        inviteCode: teamCode.trim().toUpperCase(),
-      });
-      setTeamInfo(data);
-    } catch (error) {
-      setTeamEntryError(error instanceof Error ? error.message : 'Unable to join team.');
-    } finally {
-      setTeamBusy(false);
-    }
-  };
-
-  const joinGame = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      const data = await invoke<GameLobby>('joinGame', {
-        inviteCode: joinCode.trim().toUpperCase(),
-      });
-      const assignedCase = cases.find((gameCase) => gameCase.id === data.caseId);
-      if (assignedCase) await openCase(assignedCase);
-      else setNotice(`Joined game ${data.name}. The assigned case is unavailable in this version.`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to join event.');
     }
   };
 
@@ -988,16 +1263,21 @@ export default function App() {
     setLogoutBusy(true);
     try {
       if (teamInfo) {
+        localStorage.removeItem(`arena-game-start-${teamInfo.id}`);
         await invoke('leaveTeam', { teamId: teamInfo.id }).catch(() => {});
       }
       localStorage.removeItem('arena-admin-token');
       localStorage.removeItem('arena-progress');
       localStorage.removeItem('arena-completed');
+      localStorage.removeItem('arena-local-sessions');
+      localStorage.removeItem('arena-local-rankings');
+      setLocalRankings({});
+      setGameStartedAt(null);
+      setGameElapsed(0);
       setAdminToken('');
       setAdmin(false);
       setTeamInfo(null);
       setTeamName('');
-      setTeamCode('');
       setActiveCase(null);
       setResult(null);
       setSessionReady(false);
@@ -1021,37 +1301,89 @@ export default function App() {
     }
   };
 
-  const copyTeamInvite = () => {
-    if (!teamInfo) return;
-    void navigator.clipboard?.writeText(teamInfo.inviteCode).then(() => {
-      setCopiedCode(true);
-      window.setTimeout(() => setCopiedCode(false), 1800);
+  const exportResults = () => {
+    const teamList = effectiveLeaderboard.filter((item) => item.mode === 'Team');
+    const summaryRows = teamList.map((item, index) => {
+      const secs = item.elapsedSeconds || 0;
+      const mins = Math.floor(secs / 60);
+      const rem = String(secs % 60).padStart(2, '0');
+      return {
+        Rank: index + 1,
+        Team: item.teamName || 'Team',
+        Score: item.score || 0,
+        'Cases Closed': Object.keys(item.caseScores || {}).length,
+        'Completion Time (mm:ss)': secs ? `${mins}:${rem}` : '—',
+        'Elapsed Seconds': secs,
+      };
     });
+
+    const caseRows: Array<Record<string, string | number>> = [];
+    teamList.forEach((item, index) => {
+      Object.entries(item.caseScores || {}).forEach(([cId, cScore]) => {
+        caseRows.push({
+          Rank: index + 1,
+          Team: item.teamName || 'Team',
+          'Case ID': cId.toUpperCase(),
+          Score: cScore.score ?? 0,
+          'Summary (50)': cScore.summaryScore ?? '',
+          'Sequence (50)': cScore.sequenceScore ?? '',
+          'Hints Used': cScore.hintsUsed ?? 0,
+          'Elapsed Seconds': cScore.elapsedSeconds ?? '',
+        });
+      });
+    });
+
+    const workbook = XLSX.utils.book_new();
+    const leaderboardSheet = XLSX.utils.json_to_sheet(
+      summaryRows.length
+        ? summaryRows
+        : [
+            {
+              Rank: '',
+              Team: 'No verified scores yet',
+              Score: 0,
+              'Cases Closed': 0,
+              'Completion Time (mm:ss)': '—',
+              'Elapsed Seconds': 0,
+            },
+          ]
+    );
+    XLSX.utils.book_append_sheet(workbook, leaderboardSheet, 'Leaderboard');
+
+    if (caseRows.length > 0) {
+      const breakdownSheet = XLSX.utils.json_to_sheet(caseRows);
+      XLSX.utils.book_append_sheet(workbook, breakdownSheet, 'Case Breakdown');
+    }
+
+    XLSX.writeFile(workbook, 'cyber-mystery-results.xlsx');
   };
 
-  const exportResults = () => {
-    const header = ['Rank', 'Team', 'Score', 'Completion time'];
-    const rows = leaderboard
-      .filter((item) => item.mode === 'Team')
-      .map((item, index) => [
-        index + 1,
-        item.teamName || '',
-        item.score || 0,
-        item.elapsedSeconds || '',
-      ]);
-    const csv = [header, ...rows]
-      .map((row) => row.map((field) => `"${String(field).replaceAll('"', '""')}"`).join(','))
-      .join('\n');
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    link.download = 'cyber-mystery-results.csv';
-    link.click();
-    URL.revokeObjectURL(link.href);
-  };
+  const scrollPageToTop = useCallback(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    mainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, []);
+
+  const hasLiveEvent = games.some((game) => game.status === 'live');
+
+  useEffect(() => {
+    scrollPageToTop();
+  }, [page, activeCase?.id, result, scrollPageToTop]);
+
+  useEffect(() => {
+    if (!user || !teamInfo || hasLiveEvent) return undefined;
+    const poller = window.setInterval(() => {
+      void refreshArenaData();
+    }, 6000);
+    return () => window.clearInterval(poller);
+  }, [user, teamInfo, hasLiveEvent, refreshArenaData]);
 
   const goTo = (label: PageName) => {
+    scrollPageToTop();
     setPage(label);
     setActiveCase(null);
+    setResult(null);
     setMobileMenu(false);
     setNotice('');
   };
@@ -1067,17 +1399,12 @@ export default function App() {
         teamEntryError={teamEntryError}
         teamName={teamName}
         setTeamName={setTeamName}
-        teamCode={teamCode}
-        setTeamCode={setTeamCode}
         createTeam={createTeam}
-        joinTeam={joinTeam}
         theme={theme}
         setTheme={setTheme}
       />
     );
   }
-
-  const hasLiveEvent = games.some((game) => game.status === 'live');
 
   return (
     <div className="app-shell">
@@ -1128,17 +1455,8 @@ export default function App() {
             <span className="avatar">{teamInfo.name.slice(0, 1).toUpperCase()}</span>
             <span className="account-label">
               <strong>{teamInfo.name}</strong>
-              <small>INVITE · {teamInfo.inviteCode}</small>
+              <small>SINGLE PLAYER · TEAM</small>
             </span>
-            <button
-              type="button"
-              className="chip-icon-btn"
-              title="Copy team invite code"
-              aria-label="Copy team invite code"
-              onClick={copyTeamInvite}
-            >
-              {copiedCode ? <Check size={14} /> : <Copy size={14} />}
-            </button>
           </div>
           <button
             type="button"
@@ -1160,7 +1478,7 @@ export default function App() {
         />
       )}
 
-      <main className="main-area">
+      <main className="main-area" ref={mainRef}>
         <header className="topbar">
           <div className="topbar-left">
             <button
@@ -1178,9 +1496,22 @@ export default function App() {
           </div>
 
           <div className="top-actions">
+            <div
+              className={`game-clock-pill ${
+                gameSecondsRemaining === 0
+                  ? 'is-expired'
+                  : gameSecondsRemaining <= 300
+                  ? 'is-warning'
+                  : ''
+              }`}
+              title="Entire game timer (30 minutes)"
+            >
+              <Clock3 size={13} />
+              <span>GAME · {gameTimer}</span>
+            </div>
             <div className={`event-indicator ${hasLiveEvent ? 'is-live' : ''}`}>
               <Radio size={13} />
-              <span>{hasLiveEvent ? 'LIVE EVENT' : 'OPEN INVESTIGATIONS'}</span>
+              <span>{hasLiveEvent ? 'LIVE EVENT' : 'WAITING FOR ADMIN'}</span>
             </div>
             <button
               className="icon-button"
@@ -1229,7 +1560,7 @@ export default function App() {
           </motion.div>
         )}
 
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" onExitComplete={scrollPageToTop}>
           <motion.div
             key={page + (activeCase?.id || '')}
             className="page-content"
@@ -1249,8 +1580,12 @@ export default function App() {
                 timelineOrder={timelineOrder}
                 shiftTimeline={shiftTimeline}
                 hintCount={hintCount}
+                hintBusy={hintBusy}
                 requestHint={requestHint}
                 timer={timer}
+                caseExpired={secondsRemaining === 0}
+                gameTimer={gameTimer}
+                gameExpired={gameSecondsRemaining === 0}
                 result={result}
                 submitCase={submitCase}
                 submissionBusy={submissionBusy}
@@ -1265,14 +1600,12 @@ export default function App() {
                     cases={cases}
                     games={games}
                     announcements={announcements}
-                    leaderboard={leaderboard}
+                    leaderboard={effectiveLeaderboard}
                     registeredCount={registeredCount}
-                    completed={completed}
-                    openCase={openCase}
+                    hasLiveEvent={hasLiveEvent}
+                    myRank={myRank}
+                    admin={admin}
                     setPage={goTo}
-                    setJoinCode={setJoinCode}
-                    joinCode={joinCode}
-                    joinGame={joinGame}
                   />
                 )}
                 {page === 'Dashboard' && (
@@ -1282,6 +1615,7 @@ export default function App() {
                     myRank={myRank}
                     completed={completed}
                     cases={cases}
+                    hasLiveEvent={hasLiveEvent}
                     openCase={openCase}
                     setPage={goTo}
                   />
@@ -1293,14 +1627,20 @@ export default function App() {
                     completed={completed}
                     search={search}
                     setSearch={setSearch}
+                    hasLiveEvent={hasLiveEvent}
+                    admin={admin}
+                    setPage={goTo}
+                    onRefreshStatus={() => void refreshArenaData()}
                   />
                 )}
                 {page === 'Leaderboard' && (
                   <LeaderboardView
                     filteredScores={filteredScores}
+                    totalTeams={teamRankings.length}
                     search={search}
                     setSearch={setSearch}
                     myRank={myRank}
+                    myTeamEntry={myTeamEntry}
                     exportResults={exportResults}
                     admin={admin}
                   />
@@ -1314,8 +1654,9 @@ export default function App() {
             {page === 'Admin' && (
               <AdminView
                 admin={admin}
+                hasLiveEvent={hasLiveEvent}
                 games={games}
-                leaderboard={leaderboard}
+                leaderboard={effectiveLeaderboard}
                 exportResults={exportResults}
                 invoke={invoke}
                 setNotice={setNotice}
@@ -1347,10 +1688,7 @@ function TeamRegistration({
   teamEntryError,
   teamName,
   setTeamName,
-  teamCode,
-  setTeamCode,
   createTeam,
-  joinTeam,
   theme,
   setTheme,
 }: {
@@ -1362,10 +1700,7 @@ function TeamRegistration({
   teamEntryError: string;
   teamName: string;
   setTeamName: (v: string) => void;
-  teamCode: string;
-  setTeamCode: (v: string) => void;
   createTeam: (e: FormEvent) => void;
-  joinTeam: (e: FormEvent) => void;
   theme: 'dark' | 'light';
   setTheme: (t: 'dark' | 'light') => void;
 }) {
@@ -1386,11 +1721,10 @@ function TeamRegistration({
         <span className="brand-mark team-entry-mark">
           <ShieldAlert size={20} />
         </span>
-        <div className="eyebrow">TEAM ACCESS · ARENA</div>
+        <div className="eyebrow">SINGLE PLAYER · TEAM ACCESS</div>
         <h1>Register your team.</h1>
         <p>
-          Enter your team name to start. Teammates can join from their own devices with the
-          invitation code.
+          Enter your team name to begin. Only one player can play per team from this session.
         </p>
 
         {teamLoading || !authReady ? (
@@ -1403,7 +1737,7 @@ function TeamRegistration({
         {!supabaseConfigured && (
           <div className="setup-callout">
             <LockKeyhole size={17} />
-            <span>Connect Supabase and enable Anonymous sign-in to register or join a team.</span>
+            <span>Connect Supabase and enable Anonymous sign-in to register your team.</span>
           </div>
         )}
 
@@ -1430,32 +1764,6 @@ function TeamRegistration({
           <button className="button button-primary" disabled={unavailable}>
             <Users size={15} />
             <span>{teamBusy ? 'Registering…' : 'Register team'}</span>
-            <ArrowRight size={15} />
-          </button>
-        </form>
-
-        <div className="team-entry-divider">
-          <span />
-          OR JOIN AN EXISTING TEAM
-          <span />
-        </div>
-
-        <form className="team-entry-form" onSubmit={joinTeam}>
-          <label htmlFor="team-code">
-            TEAM INVITATION CODE
-            <input
-              id="team-code"
-              required
-              minLength={4}
-              maxLength={12}
-              value={teamCode}
-              onChange={(event) => setTeamCode(event.target.value.toUpperCase())}
-              placeholder="Enter the code from your team lead"
-            />
-          </label>
-          <button className="button button-outline" disabled={unavailable}>
-            <KeyRound size={15} />
-            <span>{teamBusy ? 'Joining…' : 'Join team'}</span>
             <ArrowRight size={15} />
           </button>
         </form>
@@ -1501,26 +1809,21 @@ function HomeView({
   announcements,
   leaderboard,
   registeredCount,
-  completed,
-  openCase,
+  hasLiveEvent,
+  myRank,
+  admin,
   setPage,
-  joinCode,
-  setJoinCode,
-  joinGame,
 }: {
   cases: InvestigationCase[];
   games: GameLobby[];
   announcements: AnnouncementItem[];
   leaderboard: RankingEntry[];
   registeredCount: number | null;
-  completed: string[];
-  openCase: (c: InvestigationCase) => void;
+  hasLiveEvent: boolean;
+  myRank: number;
+  admin: boolean;
   setPage: (p: PageName) => void;
-  joinCode: string;
-  setJoinCode: (v: string) => void;
-  joinGame: (e: FormEvent) => void;
 }) {
-  const featured = caseList.find((gameCase) => !completed.includes(gameCase.id)) || caseList[0];
   const top = leaderboard.filter((score) => score.mode === 'Team').slice(0, 3);
   const liveGamesCount = games.filter((game) => game.status === 'live').length;
 
@@ -1549,7 +1852,7 @@ function HomeView({
               <b>{caseList.length}</b> original cases
             </span>
             <span>
-              <b>2–4</b> per team
+              <b>5 min</b> per case · <b>30 min</b> game
             </span>
             <span>
               <b>Live</b> team rankings
@@ -1570,10 +1873,13 @@ function HomeView({
           <div className="radar-core">
             <Fingerprint size={25} />
           </div>
-          <div className="radar-coordinate">
-            37° 46&apos; 49.2&quot; N
+          <div
+            className="radar-coordinate"
+            title="Basaveshwar Engineering College, Bagalkot, Karnataka, India"
+          >
+            16° 10&apos; 25.3&quot; N
             <br />
-            122° 25&apos; 09.6&quot; W
+            75° 39&apos; 25.9&quot; E
           </div>
         </div>
         <div className="hero-index">
@@ -1596,7 +1902,7 @@ function HomeView({
             <FileText size={17} />
           </span>
           <div>
-            <strong>{caseList.length}</strong>
+            <strong>{hasLiveEvent ? caseList.length : 'LOCKED'}</strong>
             <small>CASE FILES</small>
           </div>
         </div>
@@ -1605,8 +1911,8 @@ function HomeView({
             <Trophy size={17} />
           </span>
           <div>
-            <strong>{top[0]?.score ?? '—'}</strong>
-            <small>TOP SCORE</small>
+            <strong>{admin ? (top[0]?.score ?? '—') : myRank ? `#${myRank}` : '—'}</strong>
+            <small>{admin ? 'TOP SCORE' : 'YOUR RANK'}</small>
           </div>
         </div>
         <div className="stat-block">
@@ -1619,74 +1925,6 @@ function HomeView({
           </div>
         </div>
       </section>
-
-      <div className="content-grid home-grid">
-        <section className="section-block featured-section">
-          <div className="section-heading">
-            <div>
-              <div className="eyebrow">CASE FILE · {featured.id.toUpperCase()}</div>
-              <h2>Pick up the trail</h2>
-            </div>
-            <button className="text-link" onClick={() => setPage('Play Investigation')}>
-              All case files <ArrowRight size={14} />
-            </button>
-          </div>
-          <CaseTile
-            gameCase={featured}
-            onClick={() => openCase(featured)}
-            completed={completed.includes(featured.id)}
-            featured
-          />
-        </section>
-
-        <section className="section-block event-section">
-          <div className="section-heading">
-            <div>
-              <div className="eyebrow">FIELD OPERATIONS</div>
-              <h2>Join an event</h2>
-            </div>
-            <span className="mini-live">LOBBY</span>
-          </div>
-          <form className="join-code-form" onSubmit={joinGame}>
-            <label htmlFor="event-code">INVITATION CODE</label>
-            <div className="input-action">
-              <input
-                id="event-code"
-                value={joinCode}
-                onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
-                placeholder="e.g. ARENA26"
-                maxLength={12}
-              />
-              <button aria-label="Join event" type="submit">
-                <ArrowRight size={17} />
-              </button>
-            </div>
-          </form>
-
-          {games.length ? (
-            games.slice(0, 2).map((game) => (
-              <div className="lobby-row" key={game.id}>
-                <span className="lobby-glyph">
-                  <Radio size={16} />
-                </span>
-                <div>
-                  <strong>{game.name}</strong>
-                  <small>{game.participantCount || 0} investigators</small>
-                </div>
-                <span className={`game-status ${game.status === 'live' ? 'is-live' : ''}`}>
-                  {game.status || 'open'}
-                </span>
-              </div>
-            ))
-          ) : (
-            <div className="empty-lobby">
-              <span className="empty-line" />
-              <p>No live operations at the moment.</p>
-              <small>Enter an invite code from your event organizer.</small>
-            </div>
-          )}
-        </section>
-      </div>
 
       <div className="content-grid lower-grid">
         <section className="section-block">
@@ -1773,6 +2011,7 @@ function DashboardView({
   myRank,
   completed,
   cases: caseList,
+  hasLiveEvent,
   openCase,
   setPage,
 }: {
@@ -1781,6 +2020,7 @@ function DashboardView({
   myRank: number;
   completed: string[];
   cases: InvestigationCase[];
+  hasLiveEvent: boolean;
   openCase: (c: InvestigationCase) => void;
   setPage: (p: PageName) => void;
 }) {
@@ -1804,7 +2044,13 @@ function DashboardView({
         <Metric label="TEAM RANK" value={myRank ? `#${myRank}` : '—'} icon={Trophy} accent="orange" />
         <Metric
           label="TEAM STANDING"
-          value={completed.length >= caseList.length ? 'COMPLETED' : 'ACTIVE'}
+          value={
+            completed.length >= caseList.length
+              ? 'COMPLETED'
+              : hasLiveEvent
+              ? 'ACTIVE'
+              : 'STANDING BY'
+          }
           icon={Shield}
           accent="blue"
         />
@@ -1814,16 +2060,31 @@ function DashboardView({
         <section className="section-block">
           <div className="section-heading">
             <div>
-              <div className="eyebrow">RECOMMENDED NEXT</div>
-              <h2>{nextCase.title}</h2>
+              <div className="eyebrow">
+                {hasLiveEvent ? 'RECOMMENDED NEXT' : 'CASE ACCESS LOCKED'}
+              </div>
+              <h2>{hasLiveEvent ? nextCase.title : 'Waiting for admin start'}</h2>
             </div>
           </div>
-          <CaseTile
-            gameCase={nextCase}
-            onClick={() => openCase(nextCase)}
-            completed={completed.includes(nextCase.id)}
-            featured
-          />
+          {hasLiveEvent ? (
+            <CaseTile
+              gameCase={nextCase}
+              onClick={() => openCase(nextCase)}
+              completed={completed.includes(nextCase.id)}
+              featured
+            />
+          ) : (
+            <div className="arena-gate-card">
+              <span className="arena-gate-icon">
+                <LockKeyhole size={21} />
+              </span>
+              <h3>Case files hidden until game begins</h3>
+              <p>
+                Your team is registered and ready. All case files will unlock once the admin starts
+                the game.
+              </p>
+            </div>
+          )}
         </section>
 
         <section className="section-block">
@@ -1851,10 +2112,9 @@ function DashboardView({
           </div>
 
           <div className="team-roster-box">
-            <div className="eyebrow">TEAM INVITATION</div>
+            <div className="eyebrow">SINGLE PLAYER TEAM</div>
             <p>
-              Share code <strong className="mono-inline">{teamInfo.inviteCode}</strong> so teammates
-              can join <strong>{teamInfo.name}</strong> from their own devices.
+              <strong>{teamInfo.name}</strong> is active as a single-player team session.
             </p>
           </div>
         </section>
@@ -1869,15 +2129,69 @@ function CaseLibrary({
   completed,
   search,
   setSearch,
+  hasLiveEvent,
+  admin,
+  setPage,
+  onRefreshStatus,
 }: {
   visibleCases: InvestigationCase[];
   openCase: (c: InvestigationCase) => void;
   completed: string[];
   search: string;
   setSearch: (v: string) => void;
+  hasLiveEvent: boolean;
+  admin: boolean;
+  setPage: (p: PageName) => void;
+  onRefreshStatus: () => void;
 }) {
+  if (!hasLiveEvent) {
+    return (
+      <>
+        <PageHeading
+          eyebrow="ARENA WAITING ROOM · ADMIN CONTROLLED"
+          title="Play Investigation"
+          description="Case files are kept sealed until the organizer launches the live session from the Admin Console."
+        />
+
+        <div className="arena-gate-card">
+          <span className="arena-gate-icon">
+            <LockKeyhole size={22} />
+          </span>
+          <h2>Waiting for admin to start the game</h2>
+          <p>
+            All {visibleCases.length} cyber mystery case files are currently hidden. Once the admin
+            clicks Start Game in the Admin Console, all cases will unlock here automatically.
+          </p>
+          <div className="arena-gate-actions">
+            <button type="button" className="button button-primary" onClick={onRefreshStatus}>
+              <Radio size={15} />
+              <span>Check game status</span>
+            </button>
+            {admin && (
+              <button
+                type="button"
+                className="button button-outline"
+                onClick={() => setPage('Admin')}
+              >
+                <Settings2 size={15} />
+                <span>Open Admin Console</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="simulation-note">
+          <Shield size={15} />
+          <span>
+            All evidence is invented for training. No real links, malware, or unauthorized activity.
+          </span>
+        </div>
+      </>
+    );
+  }
+
   const foundCases = visibleCases.filter((gameCase) =>
-    `${gameCase.title} ${gameCase.subtitle} ${gameCase.category}`
+    `${gameCase.id} ${gameCase.title} ${gameCase.subtitle} ${gameCase.category}`
       .toLowerCase()
       .includes(search.toLowerCase())
   );
@@ -2019,8 +2333,12 @@ function InvestigationView({
   timelineOrder,
   shiftTimeline,
   hintCount,
+  hintBusy,
   requestHint,
   timer,
+  caseExpired,
+  gameTimer,
+  gameExpired,
   result,
   submitCase,
   submissionBusy,
@@ -2034,8 +2352,12 @@ function InvestigationView({
   timelineOrder: string[];
   shiftTimeline: (index: number, direction: -1 | 1) => void;
   hintCount: number;
+  hintBusy: boolean;
   requestHint: () => void;
   timer: string;
+  caseExpired: boolean;
+  gameTimer: string;
+  gameExpired: boolean;
   result: CaseScore | null;
   submitCase: (e: FormEvent) => void;
   submissionBusy: boolean;
@@ -2064,10 +2386,17 @@ function InvestigationView({
         <div className="investigation-status">
           {result ? 'CASE CLOSED' : 'CASE IN PROGRESS'}
         </div>
-        <div className="case-timer">
-          <Clock3 size={15} />
-          <strong>{timer}</strong>
-          <small>REMAINING</small>
+        <div className="case-timers-group">
+          <div className={`case-timer ${caseExpired && !result ? 'is-expired' : ''}`}>
+            <Clock3 size={15} />
+            <strong>{timer}</strong>
+            <small>{caseExpired && !result ? 'CASE TIME UP' : 'CASE · 5 MIN'}</small>
+          </div>
+          <div className={`case-timer ${gameExpired ? 'is-expired' : ''}`}>
+            <Clock3 size={15} />
+            <strong>{gameTimer}</strong>
+            <small>{gameExpired ? 'GAME ENDED' : 'GAME · 30 MIN'}</small>
+          </div>
         </div>
       </div>
 
@@ -2094,7 +2423,7 @@ function InvestigationView({
             <ResultPanel
               result={result}
               gameCase={activeCase}
-              onBack={() => goTo('Leaderboard')}
+              onBack={() => goTo('Play Investigation')}
             />
           ) : (
             <>
@@ -2226,35 +2555,39 @@ function InvestigationView({
                   type="button"
                   className="hint-button"
                   onClick={requestHint}
-                  disabled={hintCount >= activeCase.hints.length}
+                  disabled={hintBusy || hintCount >= activeCase.hints.length}
                 >
                   <Lightbulb size={15} />
-                  <span>Use a hint</span>
+                  <span>{hintBusy ? 'Unlocking hint...' : 'Use a hint'}</span>
                   <small>{activeCase.hints.length - hintCount} LEFT</small>
                 </button>
               </div>
 
               {hintCount > 0 && (
-                <div className="hint-reveal">
-                  <Lightbulb size={15} />
-                  <div>
-                    <strong>FIELD NOTE · HINT {hintCount}</strong>
-                    <p>{activeCase.hints[hintCount - 1]}</p>
-                  </div>
-                  <span>-5 PTS</span>
+                <div className="hints-stack">
+                  {activeCase.hints.slice(0, hintCount).map((hintText, idx) => (
+                    <div className="hint-reveal" key={idx}>
+                      <Lightbulb size={15} />
+                      <div>
+                        <strong>FIELD NOTE · HINT {idx + 1}</strong>
+                        <p>{hintText}</p>
+                      </div>
+                      <span>-5 PTS</span>
+                    </div>
+                  ))}
                 </div>
               )}
 
               <form className="verdict-form" onSubmit={submitCase}>
                 <label className="report-field">
                   <span>
-                    FINAL INVESTIGATION REPORT <small>OPTIONAL · 500 CHARACTERS</small>
+                    SUMMARIZE THE ANSWER <small>50 PTS · 500 CHARACTERS</small>
                   </span>
                   <textarea
                     maxLength={500}
                     value={report}
                     onChange={(event) => setReport(event.target.value)}
-                    placeholder="Summarize your conclusion and cite the clues that support it."
+                    placeholder="Identify the culprit and summarize the key clues and technical evidence that prove your verdict (50% of score)."
                   />
                 </label>
 
@@ -2295,12 +2628,12 @@ function InvestigationView({
                   <strong>{activeCase.evidence.length} ITEMS</strong>
                 </div>
                 <div>
-                  <span>TIME LIMIT</span>
-                  <strong>{activeCase.duration} MIN</strong>
+                  <span>CASE / GAME LIMIT</span>
+                  <strong>{activeCase.duration} MIN / 30 MIN</strong>
                 </div>
                 <div>
-                  <span>POINTS AVAILABLE</span>
-                  <strong>100 PTS</strong>
+                  <span>SCORING SPLIT</span>
+                  <strong>50 SUMMARY + 50 SEQUENCE</strong>
                 </div>
                 <div>
                   <span>HINT PENALTY</span>
@@ -2318,7 +2651,8 @@ function InvestigationView({
                 <Activity size={17} />
               </div>
               <p className="timeline-help">
-                Use the arrows to arrange events in chronological order.
+                Use the arrows to arrange events chronologically (50 pts total ·{' '}
+                {Number((50 / Math.max(1, timelineOrder.length)).toFixed(1))} pts each).
               </p>
               <ol className="timeline-list">
                 {timelineOrder.map((event, index) => (
@@ -2387,6 +2721,18 @@ function ResultPanel({
           <span>CASE</span>
           <strong>{gameCase.title}</strong>
         </div>
+        {typeof result.summaryScore === 'number' && (
+          <div>
+            <span>ANSWER SUMMARY (50%)</span>
+            <strong>{result.summaryScore} / 50</strong>
+          </div>
+        )}
+        {typeof result.sequenceScore === 'number' && (
+          <div>
+            <span>SEQUENCE (50%)</span>
+            <strong>{result.sequenceScore} / 50</strong>
+          </div>
+        )}
         <div>
           <span>RANKING</span>
           <strong>{result.rank ? `#${result.rank}` : 'Leaderboard updated'}</strong>
@@ -2397,9 +2743,24 @@ function ResultPanel({
         </div>
       </div>
 
+      {result.submittedSummary ? (
+        <div className="explanation-list">
+          <h3>Your submitted answer summary</h3>
+          <div className="debrief-item is-correct">
+            <span className="debrief-icon">
+              <FileText size={14} />
+            </span>
+            <div>
+              <strong>Team conclusion</strong>
+              <p>{result.submittedSummary}</p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {result.explanations && result.explanations.length > 0 && (
         <div className="explanation-list">
-          <h3>Case debrief</h3>
+          <h3>Official answer summary &amp; debrief</h3>
           {result.explanations.map((item, idx) => {
             const label = item.title || `Finding ${idx + 1}`;
             const isCorrect = item.correct !== false;
@@ -2422,8 +2783,8 @@ function ResultPanel({
       )}
 
       <button className="button button-primary" onClick={onBack}>
-        <span>Return to arena rankings</span>
-        <ArrowRight size={15} />
+        <ArrowLeft size={15} />
+        <span>Return to Play Investigation</span>
       </button>
     </section>
   );
@@ -2431,33 +2792,114 @@ function ResultPanel({
 
 function LeaderboardView({
   filteredScores,
+  totalTeams,
   search,
   setSearch,
   myRank,
+  myTeamEntry,
   exportResults,
   admin,
 }: {
   filteredScores: RankingEntry[];
+  totalTeams: number;
   search: string;
   setSearch: (v: string) => void;
   myRank: number;
+  myTeamEntry: RankingEntry | null;
   exportResults: () => void;
   admin: boolean;
 }) {
+  if (!admin) {
+    return (
+      <>
+        <PageHeading
+          eyebrow="TEAM STANDING · PARTICIPANT VIEW"
+          title="Leaderboard"
+          description="Only your team's current rank is shown here. Full standings are visible to administrators."
+        />
+
+        <section className="leaderboard-table-wrap">
+          <div className="table-heading">
+            <div>
+              <span className="eyebrow">YOUR TEAM STANDING</span>
+              <h2>
+                Personal rank{' '}
+                <small>
+                  {myRank ? `#${myRank} of ${Math.max(1, totalTeams)} ranked` : 'Not ranked yet'}
+                </small>
+              </h2>
+            </div>
+            <span className="current-rank">
+              <Trophy size={15} />
+              TEAM RANK <b>{myRank ? `#${myRank}` : '—'}</b>
+            </span>
+          </div>
+
+          {myTeamEntry && myRank > 0 ? (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>RANK</th>
+                    <th>TEAM</th>
+                    <th>SCORE</th>
+                    <th>TIME</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <span className={`rank-number ${myRank <= 3 ? 'top-rank' : ''}`}>
+                        {String(myRank).padStart(2, '0')}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="table-player">
+                        <span className="table-avatar">
+                          {(myTeamEntry.teamName || '?').slice(0, 1).toUpperCase()}
+                        </span>
+                        {myTeamEntry.teamName || 'Team'}
+                      </span>
+                    </td>
+                    <td className="score-cell">
+                      {myTeamEntry.score || 0}
+                      <small> PTS</small>
+                    </td>
+                    <td className="tabular-cell">
+                      {myTeamEntry.elapsedSeconds
+                        ? `${Math.floor(myTeamEntry.elapsedSeconds / 60)}:${String(
+                            myTeamEntry.elapsedSeconds % 60
+                          ).padStart(2, '0')}`
+                        : '—'}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={Trophy}
+              title="No verified score for your team yet"
+              copy="Submit at least one case verdict to receive your team's official rank."
+            />
+          )}
+        </section>
+      </>
+    );
+  }
+
   const podium = filteredScores.slice(0, 3);
   return (
     <>
       <PageHeading
-        eyebrow="LIVE RANKINGS · SERVER-VERIFIED"
+        eyebrow="LIVE RANKINGS · ADMINISTRATOR VIEW"
         title="Leaderboard"
-        description="Scores update only after a case verdict is checked by the arena server."
+        description="Full arena standings and Excel export available to administrators."
         action={
-          admin && (
-            <button className="button button-outline" onClick={exportResults}>
-              <ArrowDown size={15} />
-              <span>Export CSV</span>
-            </button>
-          )
+          <button className="button button-outline" onClick={exportResults}>
+            <ArrowDown size={15} />
+            <span>Export Excel (.xlsx)</span>
+          </button>
         }
       />
 
@@ -2609,6 +3051,7 @@ function HistoryView({
 
 function AdminView({
   admin,
+  hasLiveEvent,
   games,
   leaderboard,
   exportResults,
@@ -2619,6 +3062,7 @@ function AdminView({
   refreshArenaData,
 }: {
   admin: boolean;
+  hasLiveEvent: boolean;
   games: GameLobby[];
   leaderboard: RankingEntry[];
   exportResults: () => void;
@@ -2628,15 +3072,8 @@ function AdminView({
   lockAdmin: () => void;
   refreshArenaData: () => Promise<void>;
 }) {
-  const [eventForm, setEventForm] = useState({
-    name: '',
-    caseId: cases[0].id,
-    inviteCode: '',
-    status: 'open',
-  });
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
-  const [busy, setBusy] = useState(false);
-  const [eventError, setEventError] = useState('');
+  const [launchBusy, setLaunchBusy] = useState(false);
   const [announceBusy, setAnnounceBusy] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
@@ -2685,31 +3122,35 @@ function AdminView({
     }
   };
 
-  const createEvent = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setEventError('');
-    try {
-      const result = await invoke<GameLobby>('adminCreateGame', eventForm);
-      setNotice(`Event created with invitation code ${result.inviteCode}.`);
-      setEventForm({ name: '', caseId: cases[0].id, inviteCode: '', status: 'open' });
-      await refreshArenaData();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unable to create event.';
-      setEventError(msg);
-      handleAdminError(error, 'Unable to create event.');
-    } finally {
-      setBusy(false);
-    }
-  };
 
-  const changeStatus = async (gameId: string, status: string) => {
+  const toggleArenaLaunch = async () => {
+    setLaunchBusy(true);
     try {
-      await invoke('adminSetGameStatus', { gameId, status });
-      setNotice(`Event status changed to ${status}.`);
+      if (hasLiveEvent) {
+        const liveGames = games.filter((game) => game.status === 'live');
+        await Promise.all(
+          liveGames.map((game) => invoke('adminSetGameStatus', { gameId: game.id, status: 'paused' }))
+        );
+        setNotice('Game paused. Case files are now hidden from participants.');
+      } else {
+        const candidate = games.find((game) => game.status !== 'ended');
+        if (candidate) {
+          await invoke('adminSetGameStatus', { gameId: candidate.id, status: 'live' });
+        } else {
+          const created = await invoke<GameLobby>('adminCreateGame', {
+            name: 'Cyber Mystery Arena Live',
+            caseId: cases[0].id,
+            inviteCode: '',
+          });
+          await invoke('adminSetGameStatus', { gameId: created.id, status: 'live' });
+        }
+        setNotice('Game started! All 30 case files are now unlocked for participants.');
+      }
       await refreshArenaData();
     } catch (error) {
-      handleAdminError(error, 'Unable to update event status.');
+      handleAdminError(error, 'Unable to update game launch state.');
+    } finally {
+      setLaunchBusy(false);
     }
   };
 
@@ -2763,12 +3204,12 @@ function AdminView({
       <PageHeading
         eyebrow="RESTRICTED · ADMINISTRATOR ACCESS"
         title="Arena control room"
-        description="Manage events and announcements. Case answers and score validation remain server-controlled."
+        description="Manage live game access, teams, and announcements. Case answers and score validation remain server-controlled."
         action={
           <div className="admin-header-actions">
             <button className="button button-outline" onClick={exportResults}>
               <ArrowDown size={15} />
-              <span>Export results</span>
+              <span>Export Excel (.xlsx)</span>
             </button>
             <button className="button button-outline" onClick={lockAdmin}>
               <LockKeyhole size={15} />
@@ -2778,11 +3219,44 @@ function AdminView({
         }
       />
 
+      <div className={`admin-launch-banner ${hasLiveEvent ? 'is-live' : ''}`}>
+        <div>
+          <div className="eyebrow">
+            {hasLiveEvent ? 'GAME LIVE · PARTICIPANT ACCESS OPEN' : 'GAME LOCKED · WAITING TO START'}
+          </div>
+          <h2>
+            {hasLiveEvent
+              ? 'All 30 case files are visible to participants'
+              : 'Case files are hidden until you start the game'}
+          </h2>
+          <p>
+            {hasLiveEvent
+              ? 'Participants can browse Play Investigation and solve cases.'
+              : 'Click Start Game to unlock Play Investigation and show all cases to participants.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          className={`button ${hasLiveEvent ? 'button-outline' : 'button-primary'}`}
+          disabled={launchBusy}
+          onClick={() => void toggleArenaLaunch()}
+        >
+          {hasLiveEvent ? <Clock3 size={15} /> : <Zap size={15} />}
+          <span>
+            {launchBusy
+              ? 'Updating...'
+              : hasLiveEvent
+              ? 'Pause game & hide cases'
+              : 'Start game & show all cases'}
+          </span>
+        </button>
+      </div>
+
       <div className="admin-metrics">
         <Metric label="REGISTERED TEAMS" value={teams.length || '—'} icon={Users} accent="cyan" />
         <Metric
-          label="ACTIVE EVENTS"
-          value={games.filter((game) => game.status === 'live').length}
+          label="ARENA STATUS"
+          value={hasLiveEvent ? 'LIVE' : 'LOCKED'}
           icon={Radio}
           accent="lime"
         />
@@ -2798,120 +3272,25 @@ function AdminView({
         <section className="section-block admin-block">
           <div className="section-heading">
             <div>
-              <div className="eyebrow">EVENT OPERATIONS</div>
-              <h2>Create event lobby</h2>
-            </div>
-            <Radio size={17} />
-          </div>
-          <form className="admin-form" onSubmit={createEvent}>
-            <label>
-              EVENT NAME
-              <input
-                required
-                maxLength={60}
-                value={eventForm.name}
-                onChange={(event) => setEventForm({ ...eventForm, name: event.target.value })}
-                placeholder="Campus Cyber Fest"
-              />
-            </label>
-            <label>
-              INVESTIGATION
-              <select
-                value={eventForm.caseId}
-                onChange={(event) => setEventForm({ ...eventForm, caseId: event.target.value })}
-              >
-                {cases.map((gameCase) => (
-                  <option value={gameCase.id} key={gameCase.id}>
-                    {gameCase.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              INVITE CODE
-              <input
-                maxLength={12}
-                value={eventForm.inviteCode}
-                onChange={(event) =>
-                  setEventForm({ ...eventForm, inviteCode: event.target.value.toUpperCase() })
-                }
-                placeholder="AUTO-GENERATE"
-              />
-            </label>
-            <button className="button button-primary" disabled={busy}>
-              <span>{busy ? 'Creating...' : 'Create invitation lobby'}</span>
-              <ArrowRight size={14} />
-            </button>
-            {eventError && (
-              <p className="auth-error">
-                <ShieldAlert size={14} />
-                <span>{eventError}</span>
-              </p>
-            )}
-          </form>
-        </section>
-
-        <section className="section-block admin-block">
-          <div className="section-heading">
-            <div>
-              <div className="eyebrow">LOBBY MONITOR</div>
-              <h2>Event control</h2>
+              <div className="eyebrow">TEAM ROSTER</div>
+              <h2>Registered teams</h2>
             </div>
             <button type="button" className="text-link" onClick={loadTeams}>
-              Load teams <ArrowRight size={14} />
+              Refresh teams <ArrowRight size={14} />
             </button>
           </div>
-          {games.length ? (
-            games.map((game) => (
-              <div className="admin-event-row" key={game.id}>
-                <div>
-                  <strong>{game.name}</strong>
-                  <small>{game.inviteCode || 'No invite code'}</small>
-                </div>
-                <span className={`game-status ${game.status === 'live' ? 'is-live' : ''}`}>
-                  {game.status}
-                </span>
-                <div className="event-control-buttons">
-                  <button
-                    type="button"
-                    onClick={() => changeStatus(game.id, 'live')}
-                    title="Start event"
-                    aria-label="Start event"
-                  >
-                    <Zap size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => changeStatus(game.id, 'paused')}
-                    title="Pause event"
-                    aria-label="Pause event"
-                  >
-                    <Clock3 size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => changeStatus(game.id, 'ended')}
-                    title="End event"
-                    aria-label="End event"
-                  >
-                    <Flag size={14} />
-                  </button>
-                </div>
-              </div>
-            ))
-          ) : (
-            <p className="muted-copy">No event lobbies created yet.</p>
-          )}
 
-          {teams.length > 0 && (
+          {teams.length > 0 ? (
             <div className="participant-list">
               {teams.map((team) => (
                 <div key={team.id}>
                   <span>{team.name}</span>
-                  <small>{team.memberCount} members</small>
+                  <small>{team.memberCount === 1 ? '1 player' : `${team.memberCount} players`}</small>
                 </div>
               ))}
             </div>
+          ) : (
+            <p className="muted-copy">No registered teams loaded yet.</p>
           )}
         </section>
 

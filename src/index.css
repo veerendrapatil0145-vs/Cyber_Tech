@@ -670,6 +670,35 @@
   color: var(--emerald);
 }
 
+.game-clock-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.game-clock-pill.is-warning {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.game-clock-pill.is-expired {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
 .notice {
   margin: 1rem 2rem 0;
   padding: 0.75rem 1rem;
@@ -1574,6 +1603,13 @@
   letter-spacing: 0.08em;
 }
 
+.case-timers-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
 .case-timer {
   display: inline-flex;
   align-items: center;
@@ -1584,6 +1620,16 @@
   border: 1px solid var(--border);
   font-family: 'JetBrains Mono', monospace;
   font-variant-numeric: tabular-nums;
+}
+
+.case-timer.is-expired {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
+.case-timer.is-expired small {
+  color: var(--rose);
 }
 
 .case-timer strong {
@@ -1955,6 +2001,12 @@
 .hint-button small {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.68rem;
+}
+
+.hints-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .hint-reveal {
@@ -2466,7 +2518,7 @@ th {
 
 .admin-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.15rem;
 }
 
@@ -2530,23 +2582,102 @@ th {
 
 .event-control-buttons {
   display: inline-flex;
-  gap: 0.3rem;
+  flex-wrap: wrap;
+  gap: 0.35rem;
 }
 
 .event-control-buttons button {
-  width: 28px;
-  height: 28px;
+  min-height: 28px;
+  padding: 0 0.55rem;
   border-radius: 7px;
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
 }
 
 .event-control-buttons button:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.event-control-buttons button.is-active {
+  background: var(--emerald-soft);
+  border-color: var(--emerald);
+  color: var(--emerald);
+}
+
+.admin-launch-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1.15rem 1.35rem;
+  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  margin-bottom: 1.25rem;
+}
+
+.admin-launch-banner.is-live {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), var(--bg-card));
+}
+
+.admin-launch-banner h2 {
+  margin: 0.15rem 0 0.25rem;
+  font-size: 1.15rem;
+}
+
+.admin-launch-banner p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+}
+
+.arena-gate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1.75rem;
+  border-radius: 16px;
+  border: 1px dashed var(--border-strong);
+  background: var(--bg-card);
+}
+
+.arena-gate-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.arena-gate-card h2,
+.arena-gate-card h3 {
+  margin: 0;
+}
+
+.arena-gate-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  max-width: 56ch;
+}
+
+.arena-gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.35rem;
 }
 
 .participant-list {
