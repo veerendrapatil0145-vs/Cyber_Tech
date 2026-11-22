@@ -2,21 +2,29 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
+  Archive,
   ArrowDown,
   ArrowLeft,
   ArrowRight,
   Bell,
   BookOpen,
+  Camera,
   Check,
   CircleHelp,
+  ClipboardList,
   Clock3,
   Code2,
+  Compass,
+  CreditCard,
   Database,
   Eye,
   FileText,
   Fingerprint,
   Flag,
+  FolderSearch,
   Globe2,
+  HardDrive,
+  Headphones,
   KeyRound,
   LayoutDashboard,
   Lightbulb,
@@ -24,26 +32,36 @@ import {
   LogOut,
   Mail,
   Menu,
+  MessageSquare,
   Moon,
+  Pause,
   Plus,
+  QrCode,
   Radio,
+  Scale,
+  ScanSearch,
   Search,
   Send,
-  Settings2,
   Shield,
   ShieldAlert,
-  Sparkles,
+  SlidersHorizontal,
+  Square,
   Sun,
-  Swords,
   Target,
+  Terminal,
   Trophy,
   Users,
+  Wifi,
   X,
   Zap,
+  ZoomIn,
 } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
-import { cases, type InvestigationCase } from './cases';
+import heroForensicDeskImg from './assets/images/hero_forensic_desk_1795330905949.jpg';
+import authCampusArchiveImg from './assets/images/auth_campus_archive_1795330905908.jpg';
+import caseArchiveBackdropImg from './assets/images/case_archive_backdrop_1795330906430.jpg';
+import { cases, getCaseMaxScore, type CaseDifficulty, type InvestigationCase } from './cases';
 import { gradeCaseVerdictLocally } from './caseAnswerFallback';
 import { isAdminUser, supabase, supabaseConfigured } from './supabase.js';
 
@@ -51,7 +69,6 @@ type PageName =
   | 'Home'
   | 'Dashboard'
   | 'Play Investigation'
-  | 'Leaderboard'
   | 'My History'
   | 'Investigation'
   | 'Admin';
@@ -64,6 +81,7 @@ interface TeamInfo {
 
 interface CaseScore {
   score: number;
+  maxScore?: number;
   sequenceScore?: number;
   summaryScore?: number;
   timelineMatches?: number;
@@ -120,12 +138,46 @@ const navigation: Array<{
   label: Exclude<PageName, 'Investigation' | 'Admin'>;
   icon: typeof LayoutDashboard;
 }> = [
-  { label: 'Home', icon: LayoutDashboard },
-  { label: 'Dashboard', icon: Activity },
-  { label: 'Play Investigation', icon: Swords },
-  { label: 'Leaderboard', icon: Trophy },
-  { label: 'My History', icon: BookOpen },
+  { label: 'Home', icon: Compass },
+  { label: 'Dashboard', icon: LayoutDashboard },
+  { label: 'Play Investigation', icon: FolderSearch },
+  { label: 'My History', icon: Archive },
 ];
+
+function evidenceIconForType(type: string) {
+  const upper = type.toUpperCase();
+  if (
+    upper.includes('CCTV') ||
+    upper.includes('PHOTO') ||
+    upper.includes('IMAGE') ||
+    upper.includes('SCREENSHOT') ||
+    upper.includes('LIVESTREAM')
+  ) {
+    return Camera;
+  }
+  if (upper.includes('WI-FI') || upper.includes('WIFI') || upper.includes('ROUTER')) return Wifi;
+  if (upper.includes('EMAIL')) return Mail;
+  if (upper.includes('USB') || upper.includes('METADATA')) return HardDrive;
+  if (upper.includes('BANK')) return CreditCard;
+  if (upper.includes('AUDIO')) return Headphones;
+  if (upper.includes('QR')) return QrCode;
+  if (upper.includes('KEY')) return KeyRound;
+  if (upper.includes('OSINT')) return Globe2;
+  if (upper.includes('CHAT')) return MessageSquare;
+  if (
+    upper.includes('APP') ||
+    upper.includes('WEBSITE') ||
+    upper.includes('PORTAL') ||
+    upper.includes('ADMIN') ||
+    upper.includes('DEVICE') ||
+    upper.includes('BROWSER') ||
+    upper.includes('SCREEN LOG') ||
+    upper.includes('MEDIA')
+  ) {
+    return Terminal;
+  }
+  return ClipboardList;
+}
 
 const iconByName = {
   scan: Target,
@@ -190,6 +242,59 @@ function stored<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+interface GameClockState {
+  started: boolean;
+  accumulatedSeconds: number;
+  runningSince: number | null;
+  gameId?: string | null;
+  ended?: boolean;
+}
+
+const EMPTY_GAME_CLOCK: GameClockState = {
+  started: false,
+  accumulatedSeconds: 0,
+  runningSince: null,
+  gameId: null,
+  ended: false,
+};
+
+function readStoredGameClock(teamId: string): GameClockState {
+  const saved = stored<Partial<GameClockState> | null>(`arena-game-clock-${teamId}`, null);
+  if (saved && typeof saved.started === 'boolean') {
+    return {
+      started: saved.started,
+      accumulatedSeconds:
+        typeof saved.accumulatedSeconds === 'number' && Number.isFinite(saved.accumulatedSeconds)
+          ? Math.max(0, saved.accumulatedSeconds)
+          : 0,
+      runningSince:
+        typeof saved.runningSince === 'number' && Number.isFinite(saved.runningSince)
+          ? saved.runningSince
+          : null,
+      gameId: typeof saved.gameId === 'string' ? saved.gameId : null,
+      ended: Boolean(saved.ended),
+    };
+  }
+  const legacyStart = stored<number | null>(`arena-game-start-${teamId}`, null);
+  if (typeof legacyStart === 'number' && Number.isFinite(legacyStart)) {
+    return {
+      started: true,
+      accumulatedSeconds: Math.max(0, Math.floor((Date.now() - legacyStart) / 1000)),
+      runningSince: null,
+      gameId: null,
+      ended: false,
+    };
+  }
+  return EMPTY_GAME_CLOCK;
+}
+
+function computeClockElapsed(clock: GameClockState, now = Date.now()): number {
+  if (!clock.started) return 0;
+  const activeExtra =
+    clock.runningSince !== null ? Math.max(0, Math.floor((now - clock.runningSince) / 1000)) : 0;
+  return clock.accumulatedSeconds + activeExtra;
 }
 
 function formatClock(totalSeconds: number): string {
@@ -300,6 +405,7 @@ export default function App() {
   const [teamBusy, setTeamBusy] = useState(false);
   const [teamLoading, setTeamLoading] = useState(false);
   const [leaderboard, setLeaderboard] = useState<RankingEntry[]>([]);
+  const [serverMyRank, setServerMyRank] = useState<number | null>(null);
   const [localRankings, setLocalRankings] = useState<Record<string, Record<string, CaseScore>>>(() =>
     stored<Record<string, Record<string, CaseScore>>>('arena-local-rankings', {})
   );
@@ -307,8 +413,9 @@ export default function App() {
   const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [registeredCount, setRegisteredCount] = useState<number | null>(null);
   const [teamName, setTeamName] = useState('');
+  const [accessCode, setAccessCode] = useState('');
   const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(null);
-  const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+  const [gameClock, setGameClock] = useState<GameClockState>(EMPTY_GAME_CLOCK);
   const [gameElapsed, setGameElapsed] = useState(0);
   const caseFallbackRef = useRef(false);
   const submittingLockRef = useRef(false);
@@ -316,6 +423,7 @@ export default function App() {
   const finalizeSubmissionRef = useRef<(isAutoExpired?: boolean) => Promise<void>>(async () => {});
   const mainRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState('');
+  const [difficultyFilter, setDifficultyFilter] = useState<CaseDifficulty>('Easy');
   const [theme, setTheme] = useState<'dark' | 'light'>(() => stored('arena-theme', 'dark'));
   const [muted, setMuted] = useState<boolean>(() => stored('arena-muted', true));
   const [mobileMenu, setMobileMenu] = useState(false);
@@ -402,12 +510,18 @@ export default function App() {
       let active = true;
       const applyState = (payload: {
         rankings?: Record<string, unknown>[];
+        myRank?: number;
         games?: Record<string, unknown>[];
         announcements?: Record<string, unknown>[];
         stats?: { registered_teams?: number };
       }) => {
         if (!active) return;
-        setLeaderboard((payload.rankings || []).map(mapRanking));
+        if (Array.isArray(payload.rankings)) {
+          setLeaderboard(payload.rankings.map(mapRanking));
+        }
+        if (typeof payload.myRank === 'number') {
+          setServerMyRank(payload.myRank);
+        }
         setGames((payload.games || []).map(mapGame));
         setAnnouncements((payload.announcements || []).map(mapAnnouncement));
         if (typeof payload.stats?.registered_teams === 'number') {
@@ -427,6 +541,7 @@ export default function App() {
           if (!response.ok) return;
           const payload = (await response.json()) as {
             rankings?: Record<string, unknown>[];
+            myRank?: number;
             games?: Record<string, unknown>[];
             announcements?: Record<string, unknown>[];
             stats?: { registered_teams?: number };
@@ -454,11 +569,15 @@ export default function App() {
         try {
           const payload = JSON.parse((event as MessageEvent<string>).data) as {
             rankings?: Record<string, unknown>[];
+            myRank?: number;
             games?: Record<string, unknown>[];
             announcements?: Record<string, unknown>[];
             stats?: { registered_teams?: number };
           };
           applyState(payload);
+          if (!Array.isArray(payload.rankings)) {
+            void loadLocalState();
+          }
         } catch {
           // Ignore malformed stream events.
         }
@@ -526,11 +645,15 @@ export default function App() {
         if (!response.ok) return;
         const payload = (await response.json()) as {
           rankings?: Record<string, unknown>[];
+          myRank?: number;
           games?: Record<string, unknown>[];
           announcements?: Record<string, unknown>[];
           stats?: { registered_teams?: number };
         };
         setLeaderboard((payload.rankings || []).map(mapRanking));
+        if (typeof payload.myRank === 'number') {
+          setServerMyRank(payload.myRank);
+        }
         setGames((payload.games || []).map(mapGame));
         setAnnouncements((payload.announcements || []).map(mapAnnouncement));
         if (typeof payload.stats?.registered_teams === 'number') {
@@ -795,26 +918,156 @@ export default function App() {
 
   useEffect(() => {
     if (!teamInfo) {
-      setGameStartedAt(null);
+      setGameClock(EMPTY_GAME_CLOCK);
       setGameElapsed(0);
       return undefined;
     }
-    const existing = stored<number | null>(`arena-game-start-${teamInfo.id}`, null);
-    if (existing) {
-      setGameStartedAt(existing);
-      setGameElapsed(Math.max(0, Math.floor((Date.now() - existing) / 1000)));
-    }
+    const initial = readStoredGameClock(teamInfo.id);
+    setGameClock(initial);
+    setGameElapsed(computeClockElapsed(initial));
     return undefined;
   }, [teamInfo]);
 
+  const activeLiveGame = games.find((game) => game.status === 'live') || null;
+  const hasLiveEvent = Boolean(activeLiveGame);
+  const isGamePaused = !hasLiveEvent && games.some((game) => game.status === 'paused');
+  const isGameEnded =
+    !hasLiveEvent &&
+    !isGamePaused &&
+    games.length > 0 &&
+    games.every((game) => game.status === 'ended');
+
+  const clearIncompleteLocalTimers = useCallback((teamId?: string | null) => {
+    if (teamId) {
+      localStorage.removeItem(`arena-game-start-${teamId}`);
+      localStorage.removeItem(`arena-game-clock-${teamId}`);
+      const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+      let changed = false;
+      for (const [key, sess] of Object.entries(sessions)) {
+        if (key.startsWith(`${teamId}:`) && !sess.completed) {
+          delete sessions[key];
+          changed = true;
+        }
+      }
+      if (changed) {
+        localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+      }
+    }
+    localStorage.removeItem('arena-progress');
+    autoClosedCaseKeyRef.current = null;
+    setElapsed(0);
+    setGameClock(EMPTY_GAME_CLOCK);
+    setGameElapsed(0);
+  }, []);
+
   useEffect(() => {
-    if (!gameStartedAt) return undefined;
-    setGameElapsed(Math.max(0, Math.floor((Date.now() - gameStartedAt) / 1000)));
+    if (!teamInfo) {
+      return undefined;
+    }
+
+    if (isGameEnded) {
+      if (!gameClock.started) {
+        setGameElapsed(0);
+        return undefined;
+      }
+      if (gameClock.runningSince !== null || !gameClock.ended) {
+        const frozen: GameClockState = {
+          started: true,
+          accumulatedSeconds: computeClockElapsed(gameClock),
+          runningSince: null,
+          gameId: gameClock.gameId ?? null,
+          ended: true,
+        };
+        localStorage.setItem(`arena-game-clock-${teamInfo.id}`, JSON.stringify(frozen));
+        setGameClock(frozen);
+        setGameElapsed(frozen.accumulatedSeconds);
+        return undefined;
+      }
+      setGameElapsed(gameClock.accumulatedSeconds);
+      return undefined;
+    }
+
+    const isDifferentLiveGame = Boolean(
+      activeLiveGame && gameClock.gameId && activeLiveGame.id !== gameClock.gameId
+    );
+    if (gameClock.ended || isDifferentLiveGame) {
+      clearIncompleteLocalTimers(teamInfo.id);
+      return undefined;
+    }
+
+    if (!gameClock.started) {
+      if (
+        hasLiveEvent &&
+        activeLiveGame &&
+        page === 'Investigation' &&
+        activeCase &&
+        !result
+      ) {
+        const freshClock: GameClockState = {
+          started: true,
+          accumulatedSeconds: 0,
+          runningSince: Date.now(),
+          gameId: activeLiveGame.id,
+          ended: false,
+        };
+        localStorage.setItem(`arena-game-clock-${teamInfo.id}`, JSON.stringify(freshClock));
+        setGameClock(freshClock);
+        setGameElapsed(0);
+        setElapsed(0);
+        return undefined;
+      }
+      setGameElapsed(0);
+      return undefined;
+    }
+
+    if (!hasLiveEvent) {
+      if (gameClock.runningSince !== null) {
+        const frozen: GameClockState = {
+          started: true,
+          accumulatedSeconds: computeClockElapsed(gameClock),
+          runningSince: null,
+          gameId: gameClock.gameId ?? null,
+          ended: false,
+        };
+        localStorage.setItem(`arena-game-clock-${teamInfo.id}`, JSON.stringify(frozen));
+        setGameClock(frozen);
+        setGameElapsed(frozen.accumulatedSeconds);
+        return undefined;
+      }
+      setGameElapsed(gameClock.accumulatedSeconds);
+      return undefined;
+    }
+
+    if (gameClock.runningSince === null || (!gameClock.gameId && activeLiveGame)) {
+      const resumed: GameClockState = {
+        started: true,
+        accumulatedSeconds: gameClock.accumulatedSeconds,
+        runningSince: gameClock.runningSince ?? Date.now(),
+        gameId: activeLiveGame?.id ?? gameClock.gameId ?? null,
+        ended: false,
+      };
+      localStorage.setItem(`arena-game-clock-${teamInfo.id}`, JSON.stringify(resumed));
+      setGameClock(resumed);
+      setGameElapsed(computeClockElapsed(resumed));
+      return undefined;
+    }
+
+    setGameElapsed(computeClockElapsed(gameClock));
     const ticker = window.setInterval(() => {
-      setGameElapsed(Math.max(0, Math.floor((Date.now() - gameStartedAt) / 1000)));
+      setGameElapsed(computeClockElapsed(gameClock));
     }, 1000);
     return () => window.clearInterval(ticker);
-  }, [gameStartedAt]);
+  }, [
+    gameClock,
+    hasLiveEvent,
+    isGameEnded,
+    activeLiveGame,
+    teamInfo,
+    page,
+    activeCase,
+    result,
+    clearIncompleteLocalTimers,
+  ]);
 
   useEffect(() => {
     if (!activeCase) return undefined;
@@ -853,10 +1106,10 @@ export default function App() {
   }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, user, teamInfo, result, invoke]);
 
   useEffect(() => {
-    if (!activeCase || result) return undefined;
+    if (!activeCase || result || !hasLiveEvent) return undefined;
     const ticker = window.setInterval(() => setElapsed((seconds) => seconds + 1), 1000);
     return () => window.clearInterval(ticker);
-  }, [activeCase, result]);
+  }, [activeCase, result, hasLiveEvent]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -921,30 +1174,34 @@ export default function App() {
     return [...new Set([...localCompleted, ...serverClosed, ...localTeamClosed])];
   }, [effectiveLeaderboard, localRankings, teamInfo, user, result]);
 
-  const filteredScores = useMemo(
+  const myTeamEntry = useMemo(
     () =>
-      effectiveLeaderboard.filter(
+      effectiveLeaderboard.find(
         (score) =>
           score.mode === 'Team' &&
-          `${score.teamName || ''}`.toLowerCase().includes(search.toLowerCase())
-      ),
-    [effectiveLeaderboard, search]
+          (score.teamId === teamInfo?.id ||
+            score.id === `local_${teamInfo?.id}` ||
+            (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false))
+      ) || null,
+    [effectiveLeaderboard, teamInfo?.id, user?.id]
   );
 
-  const teamRankings = useMemo(
-    () => effectiveLeaderboard.filter((score) => score.mode === 'Team'),
-    [effectiveLeaderboard]
-  );
+  const fallbackTeamRankIndex = useMemo(() => {
+    const teamList = effectiveLeaderboard.filter((score) => score.mode === 'Team');
+    return teamList.findIndex(
+      (score) =>
+        score.teamId === teamInfo?.id ||
+        score.id === `local_${teamInfo?.id}` ||
+        (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false)
+    );
+  }, [effectiveLeaderboard, teamInfo?.id, user?.id]);
 
-  const myTeamIndex = teamRankings.findIndex(
-    (score) =>
-      score.teamId === teamInfo?.id ||
-      score.id === `local_${teamInfo?.id}` ||
-      (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false)
-  );
-
-  const myRank = myTeamIndex >= 0 ? myTeamIndex + 1 : 0;
-  const myTeamEntry = myTeamIndex >= 0 ? teamRankings[myTeamIndex] : null;
+  const myRank =
+    typeof serverMyRank === 'number'
+      ? serverMyRank
+      : fallbackTeamRankIndex >= 0
+      ? fallbackTeamRankIndex + 1
+      : 0;
   const teamScore = myTeamEntry?.score ?? 0;
 
   const activeOrLatestGame = useMemo(
@@ -961,7 +1218,7 @@ export default function App() {
 
   const secondsRemaining = Math.max(0, (activeCase?.duration || 0) * 60 - elapsed);
   const timer = formatClock(secondsRemaining);
-  const gameSecondsRemaining = gameStartedAt
+  const gameSecondsRemaining = gameClock.started
     ? Math.max(0, totalGameDurationSeconds - gameElapsed)
     : totalGameDurationSeconds;
   const gameTimer = formatClock(gameSecondsRemaining);
@@ -1012,17 +1269,29 @@ export default function App() {
       return;
     }
     if (!hasLiveEvent && !bypassGateCheck) {
-      setNotice('Cases are locked until the admin starts the game.');
+      setNotice(
+        isGameEnded
+          ? 'This game has ended. Final standings are reviewed by the event administrators.'
+          : isGamePaused
+          ? 'Game is currently paused by the administrator.'
+          : 'Cases are locked until the admin starts the game.'
+      );
       return;
     }
-    if (gameStartedAt && gameSecondsRemaining <= 0) {
+    if (gameClock.started && gameSecondsRemaining <= 0) {
       setNotice(`The ${configuredGameMinutes}-minute arena game clock has ended.`);
       return;
     }
-    if (!gameStartedAt) {
-      const now = Date.now();
-      localStorage.setItem(`arena-game-start-${teamInfo.id}`, JSON.stringify(now));
-      setGameStartedAt(now);
+    if (!gameClock.started) {
+      const nextClock: GameClockState = {
+        started: true,
+        accumulatedSeconds: 0,
+        runningSince: hasLiveEvent ? Date.now() : null,
+        gameId: activeLiveGame?.id ?? null,
+      };
+      localStorage.setItem(`arena-game-clock-${teamInfo.id}`, JSON.stringify(nextClock));
+      localStorage.removeItem(`arena-game-start-${teamInfo.id}`);
+      setGameClock(nextClock);
       setGameElapsed(0);
     }
 
@@ -1188,6 +1457,9 @@ export default function App() {
       localStorage.setItem('arena-completed', JSON.stringify(nextCompleted));
       localStorage.removeItem('arena-progress');
       setResult(enriched);
+      if (typeof scorePayload.rank === 'number' && scorePayload.rank > 0) {
+        setServerMyRank(scorePayload.rank);
+      }
       setSessionReady(false);
       setNotice(
         isAutoExpired
@@ -1255,13 +1527,22 @@ export default function App() {
   finalizeSubmissionRef.current = finalizeSubmission;
 
   useEffect(() => {
-    if (page !== 'Investigation' || !activeCase || result || !sessionReady || !teamInfo) return;
+    if (
+      page !== 'Investigation' ||
+      !activeCase ||
+      result ||
+      !sessionReady ||
+      !teamInfo ||
+      !hasLiveEvent
+    ) {
+      return;
+    }
     if (elapsed < activeCase.duration * 60) return;
     const lockKey = `${teamInfo.id}:${activeCase.id}`;
     if (autoClosedCaseKeyRef.current === lockKey) return;
     autoClosedCaseKeyRef.current = lockKey;
     void finalizeSubmissionRef.current(true);
-  }, [page, activeCase, result, sessionReady, teamInfo, elapsed]);
+  }, [page, activeCase, result, sessionReady, teamInfo, elapsed, hasLiveEvent]);
 
   const submitCase = async (event: FormEvent) => {
     event.preventDefault();
@@ -1270,10 +1551,18 @@ export default function App() {
 
   const createTeam = async (event: FormEvent) => {
     event.preventDefault();
+    const trimmedCode = accessCode.trim();
+    if (!trimmedCode || trimmedCode !== 'Avion_2026') {
+      setTeamEntryError('Invalid access code. Please contact the organizer for the valid access code.');
+      return;
+    }
     setTeamBusy(true);
     setTeamEntryError('');
     try {
-      const data = await invoke<TeamInfo>('createTeam', { name: teamName.trim() });
+      const data = await invoke<TeamInfo>('createTeam', {
+        name: teamName.trim(),
+        accessCode: trimmedCode,
+      });
       setTeamInfo(data);
     } catch (error) {
       setTeamEntryError(error instanceof Error ? error.message : 'Unable to register team.');
@@ -1307,6 +1596,7 @@ export default function App() {
     try {
       if (teamInfo) {
         localStorage.removeItem(`arena-game-start-${teamInfo.id}`);
+        localStorage.removeItem(`arena-game-clock-${teamInfo.id}`);
         await invoke('leaveTeam', { teamId: teamInfo.id }).catch(() => {});
       }
       localStorage.removeItem('arena-admin-token');
@@ -1315,12 +1605,14 @@ export default function App() {
       localStorage.removeItem('arena-local-sessions');
       localStorage.removeItem('arena-local-rankings');
       setLocalRankings({});
-      setGameStartedAt(null);
+      setServerMyRank(null);
+      setGameClock(EMPTY_GAME_CLOCK);
       setGameElapsed(0);
       setAdminToken('');
       setAdmin(false);
       setTeamInfo(null);
       setTeamName('');
+      setAccessCode('');
       setActiveCase(null);
       setResult(null);
       setSessionReady(false);
@@ -1363,13 +1655,18 @@ export default function App() {
     const caseRows: Array<Record<string, string | number>> = [];
     teamList.forEach((item, index) => {
       Object.entries(item.caseScores || {}).forEach(([cId, cScore]) => {
+        const matchedCase = cases.find((entry) => entry.id === cId);
+        const maxPoints =
+          cScore.maxScore ?? (matchedCase ? getCaseMaxScore(matchedCase.difficulty) : 100);
+        const hasTimeline = (cScore.totalTimeline ?? 0) > 0;
         caseRows.push({
           Rank: index + 1,
           Team: item.teamName || 'Team',
           'Case ID': cId.toUpperCase(),
           Score: cScore.score ?? 0,
-          'Summary (50)': cScore.summaryScore ?? '',
-          'Sequence (50)': cScore.sequenceScore ?? '',
+          'Max Points': maxPoints,
+          'Summary Score': cScore.summaryScore ?? '',
+          'Sequence Score': hasTimeline ? cScore.sequenceScore ?? '' : 'N/A',
           'Hints Used': cScore.hintsUsed ?? 0,
           'Elapsed Seconds': cScore.elapsedSeconds ?? '',
         });
@@ -1408,8 +1705,6 @@ export default function App() {
     mainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, []);
 
-  const hasLiveEvent = games.some((game) => game.status === 'live');
-
   useEffect(() => {
     scrollPageToTop();
   }, [page, activeCase?.id, result, scrollPageToTop]);
@@ -1444,6 +1739,8 @@ export default function App() {
         teamEntryError={teamEntryError}
         teamName={teamName}
         setTeamName={setTeamName}
+        accessCode={accessCode}
+        setAccessCode={setAccessCode}
         createTeam={createTeam}
         theme={theme}
         setTheme={setTheme}
@@ -1461,7 +1758,7 @@ export default function App() {
           aria-label="Cyber Mystery Arena home"
         >
           <span className="brand-mark">
-            <ShieldAlert size={20} />
+            <ScanSearch size={20} />
           </span>
           <span className="brand-type">
             <strong>CYBER MYSTERY</strong>
@@ -1491,7 +1788,7 @@ export default function App() {
           className={`nav-link admin-link ${page === 'Admin' ? 'active' : ''}`}
           onClick={() => goTo('Admin')}
         >
-          <Settings2 size={17} />
+          <SlidersHorizontal size={17} />
           <span>Admin console</span>
         </button>
 
@@ -1543,20 +1840,58 @@ export default function App() {
           <div className="top-actions">
             <div
               className={`game-clock-pill ${
-                gameSecondsRemaining === 0
+                isGameEnded || gameSecondsRemaining === 0
                   ? 'is-expired'
+                  : isGamePaused
+                  ? 'is-paused'
                   : gameSecondsRemaining <= 300
                   ? 'is-warning'
                   : ''
               }`}
-              title={`Entire game timer (${configuredGameMinutes} minutes)`}
+              title={
+                isGameEnded
+                  ? `Game ended (${gameTimer} remaining of ${configuredGameMinutes} minutes)`
+                  : isGamePaused
+                  ? `Game paused (${gameTimer} remaining of ${configuredGameMinutes} minutes)`
+                  : `Entire game timer (${configuredGameMinutes} minutes)`
+              }
             >
-              <Clock3 size={13} />
-              <span>GAME · {gameTimer}</span>
+              {isGameEnded ? (
+                <Square size={12} />
+              ) : isGamePaused ? (
+                <Pause size={13} />
+              ) : (
+                <Clock3 size={13} />
+              )}
+              <span>
+                {isGameEnded
+                  ? `ENDED · ${gameTimer}`
+                  : isGamePaused
+                  ? `PAUSED · ${gameTimer}`
+                  : `GAME · ${gameTimer}`}
+              </span>
             </div>
-            <div className={`event-indicator ${hasLiveEvent ? 'is-live' : ''}`}>
+            <div
+              className={`event-indicator ${
+                hasLiveEvent
+                  ? 'is-live'
+                  : isGameEnded
+                  ? 'is-ended'
+                  : isGamePaused
+                  ? 'is-paused'
+                  : ''
+              }`}
+            >
               <Radio size={13} />
-              <span>{hasLiveEvent ? 'LIVE EVENT' : 'WAITING FOR ADMIN'}</span>
+              <span>
+                {hasLiveEvent
+                  ? 'LIVE EVENT'
+                  : isGameEnded
+                  ? 'GAME ENDED'
+                  : isGamePaused
+                  ? 'GAME PAUSED'
+                  : 'WAITING FOR ADMIN'}
+              </span>
             </div>
             <button
               className="icon-button"
@@ -1632,6 +1967,9 @@ export default function App() {
                 gameTimer={gameTimer}
                 configuredGameMinutes={configuredGameMinutes}
                 gameExpired={gameSecondsRemaining === 0}
+                hasLiveEvent={hasLiveEvent}
+                isGamePaused={isGamePaused}
+                isGameEnded={isGameEnded}
                 result={result}
                 submitCase={submitCase}
                 submissionBusy={submissionBusy}
@@ -1650,7 +1988,7 @@ export default function App() {
                     registeredCount={registeredCount}
                     hasLiveEvent={hasLiveEvent}
                     configuredGameMinutes={configuredGameMinutes}
-                    myRank={myRank}
+                    completedCount={completed.length}
                     admin={admin}
                     setPage={goTo}
                   />
@@ -1663,6 +2001,8 @@ export default function App() {
                     completed={completed}
                     cases={cases}
                     hasLiveEvent={hasLiveEvent}
+                    isGamePaused={isGamePaused}
+                    isGameEnded={isGameEnded}
                     openCase={openCase}
                     setPage={goTo}
                   />
@@ -1674,22 +2014,14 @@ export default function App() {
                     completed={completed}
                     search={search}
                     setSearch={setSearch}
+                    difficultyFilter={difficultyFilter}
+                    setDifficultyFilter={setDifficultyFilter}
                     hasLiveEvent={hasLiveEvent}
+                    isGamePaused={isGamePaused}
+                    isGameEnded={isGameEnded}
                     admin={admin}
                     setPage={goTo}
                     onRefreshStatus={() => void refreshArenaData()}
-                  />
-                )}
-                {page === 'Leaderboard' && (
-                  <LeaderboardView
-                    filteredScores={filteredScores}
-                    totalTeams={teamRankings.length}
-                    search={search}
-                    setSearch={setSearch}
-                    myRank={myRank}
-                    myTeamEntry={myTeamEntry}
-                    exportResults={exportResults}
-                    admin={admin}
                   />
                 )}
                 {page === 'My History' && (
@@ -1702,6 +2034,8 @@ export default function App() {
               <AdminView
                 admin={admin}
                 hasLiveEvent={hasLiveEvent}
+                isGamePaused={isGamePaused}
+                isGameEnded={isGameEnded}
                 configuredGameMinutes={configuredGameMinutes}
                 games={games}
                 leaderboard={effectiveLeaderboard}
@@ -1711,6 +2045,7 @@ export default function App() {
                 unlockAdmin={unlockAdmin}
                 lockAdmin={lockAdmin}
                 refreshArenaData={refreshArenaData}
+                onNewGameCreated={() => clearIncompleteLocalTimers(teamInfo?.id)}
               />
             )}
           </motion.div>
@@ -1736,6 +2071,8 @@ function TeamRegistration({
   teamEntryError,
   teamName,
   setTeamName,
+  accessCode,
+  setAccessCode,
   createTeam,
   theme,
   setTheme,
@@ -1748,6 +2085,8 @@ function TeamRegistration({
   teamEntryError: string;
   teamName: string;
   setTeamName: (v: string) => void;
+  accessCode: string;
+  setAccessCode: (v: string) => void;
   createTeam: (e: FormEvent) => void;
   theme: 'dark' | 'light';
   setTheme: (t: 'dark' | 'light') => void;
@@ -1756,6 +2095,9 @@ function TeamRegistration({
   return (
     <main className="team-entry-shell">
       <div className="ambient-grid" aria-hidden="true" />
+      <div className="team-entry-backdrop" aria-hidden="true">
+        <img src={authCampusArchiveImg} alt="" referrerPolicy="no-referrer" />
+      </div>
       <button
         type="button"
         className="icon-button entry-theme-btn"
@@ -1767,12 +2109,13 @@ function TeamRegistration({
 
       <section className="team-entry-card">
         <span className="brand-mark team-entry-mark">
-          <ShieldAlert size={20} />
+          <ScanSearch size={20} />
         </span>
         <div className="eyebrow">SINGLE PLAYER · TEAM ACCESS</div>
         <h1>Register your team.</h1>
         <p>
-          Enter your team name to begin. Only one player can play per team from this session.
+          Enter your team name and event access code to begin. Only one player can play per team
+          from this session.
         </p>
 
         {teamLoading || !authReady ? (
@@ -1809,6 +2152,17 @@ function TeamRegistration({
               placeholder="e.g. Packet Detectives"
             />
           </label>
+          <label htmlFor="access-code">
+            ACCESS CODE
+            <input
+              id="access-code"
+              required
+              autoComplete="off"
+              value={accessCode}
+              onChange={(event) => setAccessCode(event.target.value)}
+              placeholder="Enter event access code"
+            />
+          </label>
           <button className="button button-primary" disabled={unavailable}>
             <Users size={15} />
             <span>{teamBusy ? 'Registering…' : 'Register team'}</span>
@@ -1819,8 +2173,8 @@ function TeamRegistration({
         <p className="team-entry-footnote">
           <Shield size={12} />
           <span>
-            A Supabase anonymous account remembers this browser&apos;s team session. Clearing
-            browser data loses access to that account.
+            Registration is protected by event access code. Clearing browser data loses access to
+            this team session.
           </span>
         </p>
       </section>
@@ -1859,7 +2213,7 @@ function HomeView({
   registeredCount,
   hasLiveEvent,
   configuredGameMinutes,
-  myRank,
+  completedCount,
   admin,
   setPage,
 }: {
@@ -1870,16 +2224,29 @@ function HomeView({
   registeredCount: number | null;
   hasLiveEvent: boolean;
   configuredGameMinutes: number;
-  myRank: number;
+  completedCount: number;
   admin: boolean;
   setPage: (p: PageName) => void;
 }) {
   const top = leaderboard.filter((score) => score.mode === 'Team').slice(0, 3);
   const liveGamesCount = games.filter((game) => game.status === 'live').length;
+  const [rulesModalOpen, setRulesModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!rulesModalOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setRulesModalOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [rulesModalOpen]);
 
   return (
     <>
       <section className="hero-panel">
+        <div className="hero-photo-backdrop" aria-hidden="true">
+          <img src={heroForensicDeskImg} alt="" referrerPolicy="no-referrer" />
+        </div>
         <div className="hero-copy">
           <div className="eyebrow hero-eyebrow">THE CAMPUS CYBER INVESTIGATION LEAGUE</div>
           <h1>
@@ -1892,20 +2259,28 @@ function HomeView({
           </p>
           <div className="hero-actions">
             <button className="button button-primary" onClick={() => setPage('Play Investigation')}>
-              <Swords size={16} />
+              <FolderSearch size={16} />
               <span>Enter the arena</span>
               <ArrowRight size={15} />
+            </button>
+            <button
+              type="button"
+              className="button button-outline hero-secondary-btn"
+              onClick={() => setRulesModalOpen(true)}
+            >
+              <BookOpen size={15} />
+              <span>Mission Rules</span>
             </button>
           </div>
           <div className="hero-proof">
             <span>
-              <b>{caseList.length}</b> original cases
+              <b>{caseList.length}</b> forensic cases
             </span>
             <span>
               <b>5 min</b> per case · <b>{configuredGameMinutes} min</b> game
             </span>
             <span>
-              <b>Live</b> team rankings
+              <b>Easy · Medium · Hard</b> tiers
             </span>
           </div>
         </div>
@@ -1938,7 +2313,7 @@ function HomeView({
       </section>
 
       <section className="stats-strip">
-        <div className="stat-block">
+        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <span className="stat-icon">
             <Users size={17} />
           </span>
@@ -1947,7 +2322,7 @@ function HomeView({
             <small>REGISTERED TEAMS</small>
           </div>
         </div>
-        <div className="stat-block">
+        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <span className="stat-icon">
             <FileText size={17} />
           </span>
@@ -1956,16 +2331,16 @@ function HomeView({
             <small>CASE FILES</small>
           </div>
         </div>
-        <div className="stat-block">
+        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <span className="stat-icon">
-            <Trophy size={17} />
+            {admin ? <Trophy size={17} /> : <Check size={17} />}
           </span>
           <div>
-            <strong>{admin ? (top[0]?.score ?? '—') : myRank ? `#${myRank}` : '—'}</strong>
-            <small>{admin ? 'TOP SCORE' : 'YOUR RANK'}</small>
+            <strong>{admin ? (top[0]?.score ?? '—') : completedCount}</strong>
+            <small>{admin ? 'TOP SCORE' : 'CASES SOLVED'}</small>
           </div>
         </div>
-        <div className="stat-block">
+        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <span className="stat-icon">
             <Radio size={17} />
           </span>
@@ -1976,63 +2351,74 @@ function HomeView({
         </div>
       </section>
 
-      <section className="section-block rules-section" aria-labelledby="rules-heading">
+      <section
+        className="section-block rules-section dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20"
+        aria-labelledby="rules-heading"
+      >
         <div className="section-heading">
           <div>
-            <div className="eyebrow">AVON TECH EVENT · OFFICIAL GUIDELINES</div>
-            <h2 id="rules-heading">Cyber Mystery Arena: Rules &amp; Regulations</h2>
-            <p className="rules-subtitle">
-              Participant Instructions, Scoring Policy &amp; Fair Play Code
-            </p>
+            <div className="eyebrow">OFFICIAL GUIDELINES</div>
+            <h2 id="rules-heading">Rules &amp; Regulations</h2>
           </div>
-          <a
-            className="button button-outline"
-            href="/assets/aistudio/Avon_-_Cyber_Mystery_Arena_Rules___Regulations_c957d254.pdf"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <FileText size={15} />
-            <span>Open Rules PDF</span>
-          </a>
+          <div className="rules-header-actions">
+            <button
+              type="button"
+              className="button button-outline"
+              onClick={() => setRulesModalOpen(true)}
+            >
+              <BookOpen size={15} />
+              <span>Mission Rules</span>
+            </button>
+            <a
+              className="button button-outline"
+              href="/assets/aistudio/Avon_-_Cyber_Mystery_Arena_Rules___Regulations_c957d254.pdf"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <FileText size={15} />
+              <span>Open Rules PDF</span>
+            </a>
+          </div>
         </div>
 
-        <div className="rules-mission-card">
-          <div className="rules-card-head">
-            <span className="rules-num">01</span>
-            <strong>Mission Objective</strong>
-          </div>
-          <p>
-            Your objective is to investigate simulated digital crime scenes, analyze system logs and
-            suspect alibis, reconstruct the exact sequence of events, and identify the true culprit
-            before the event timer expires. Cases remain locked until the administrator starts the
-            game.
-          </p>
-        </div>
-
-        <div className="rules-grid">
+        <div className="rules-compact-grid">
           <article className="rules-card">
             <div className="rules-card-head">
-              <span className="rules-num">02</span>
+              <span className="rules-num">01</span>
               <strong>How to Play</strong>
+              <FolderSearch size={15} className="rules-head-icon" />
             </div>
             <ul className="rules-list">
               <li>
-                <b>Inspect Evidence:</b> Open the <em>Evidence</em> tab to examine server access logs,
-                chat snippets, IP addresses, device records, and timestamps.
+                Select <b>Easy</b>, <b>Medium</b>, or <b>Hard</b> cases once the admin starts the
+                game.
               </li>
               <li>
-                <b>Cross-Examine Suspects:</b> Review every suspect&apos;s role and statement in the{' '}
-                <em>Suspects</em> tab and verify their alibi against the digital logs.
+                Inspect logs, image clues, and suspect alibis, then name the single culprit in{' '}
+                <em>Summarize the Answer</em>.
               </li>
               <li>
-                <b>Reconstruct the Timeline:</b> Use the directional arrows in the{' '}
-                <em>Sequence Reconstruction</em> panel to arrange the 4 scrambled events in strict
-                chronological order (earliest to latest).
+                <b>Hard</b> cases also include a 4-step <em>Timeline builder</em>.
+              </li>
+            </ul>
+          </article>
+
+          <article className="rules-card">
+            <div className="rules-card-head">
+              <span className="rules-num">02</span>
+              <strong>Scoring &amp; Timers</strong>
+              <Scale size={15} className="rules-head-icon" />
+            </div>
+            <ul className="rules-list">
+              <li>
+                <b>Easy:</b> 50 pts · <b>Medium:</b> 75 pts · <b>Hard:</b> 100 pts (50 Timeline + 50
+                Summary).
               </li>
               <li>
-                <b>Submit Final Verdict:</b> In <em>Summarize the Answer</em>, name the single true
-                culprit with brief supporting information (up to 500 characters) and click{' '}
-                <em>Submit Final Verdict</em>.
+                Multiple culprit names reduce marks; max 2 hints per case (<b>-5 pts</b> each).
+              </li>
+              <li>
+                <b>5 min</b> per case · <b>{configuredGameMinutes} min</b> total arena time.
               </li>
             </ul>
           </article>
@@ -2040,71 +2426,125 @@ function HomeView({
           <article className="rules-card">
             <div className="rules-card-head">
               <span className="rules-num">03</span>
-              <strong>Scoring, Timers &amp; Hints</strong>
+              <strong>Fair Play</strong>
+              <Shield size={15} className="rules-head-icon" />
             </div>
             <ul className="rules-list">
-              <li>
-                <b>50 / 50 Scoring Split:</b> Each case is worth 100 points — <b>50 pts</b> for{' '}
-                <em>Sequence Recognition</em> (divided equally across the 4 timeline orders at 12.5
-                pts each) and <b>50 pts</b> for <em>Answer Summary</em>.
-              </li>
-              <li>
-                <b>Answer Summary Rule:</b> Naming only the true culprit with brief supporting
-                details earns full <b>50 / 50</b> summary marks. Entering multiple culprit or
-                suspect names reduces your score (<b>-15 PTS</b> per extra name).
-              </li>
-              <li>
-                <b>Case &amp; Game Timers:</b> Each case auto-closes after <b>5 minutes</b>. Total
-                arena game time is set by the admin (currently <b>{configuredGameMinutes} minutes</b>).
-              </li>
-              <li>
-                <b>Field Note Hints &amp; Tie-Breaker:</b> Each case offers 2 hints at <b>-5 PTS</b>{' '}
-                each. Identical total scores are ranked by faster completion time and fewer hint
-                penalties.
-              </li>
+              <li>One player per registered team in a single browser tab.</li>
+              <li>No source inspection, server probing, or cross-team answer sharing.</li>
+              <li>Decisions of the <b>Avon Event Coordinators</b> are final.</li>
             </ul>
           </article>
         </div>
-
-        <div className="rules-card">
-          <div className="rules-card-head">
-            <span className="rules-num">04</span>
-            <strong>Fair Play &amp; Event Conduct</strong>
-          </div>
-          <ul className="rules-list rules-list-two-col">
-            <li>
-              <b>No External Attacks:</b> This is a fictional training environment. Attempting to
-              inspect page source code for answers, brute-force endpoints, or test findings against
-              the hosting server results in immediate disqualification.
-            </li>
-            <li>
-              <b>No Cross-Team Sharing:</b> Sharing answers, timeline sequences, or evidence
-              interpretations with other competing teams is strictly prohibited.
-            </li>
-            <li>
-              <b>Single Player Active Session:</b> Only one player plays per registered team from a
-              single browser session. Refreshing or opening multiple tabs simultaneously may reset
-              unsaved timeline progress.
-            </li>
-            <li>
-              <b>Organizer Authority:</b> In the event of any technical dispute or scoring
-              discrepancy, the decision of the <b>Avon Event Coordinators</b> will be final.
-            </li>
-          </ul>
-        </div>
-
-        <div className="rules-tip-callout">
-          <Lightbulb size={16} />
-          <div>
-            <strong>Quick Investigator Tip:</strong> Start by comparing timestamps and IP/MAC
-            identifiers in the <em>Evidence</em> tab against each suspect&apos;s alibi, then use the
-            single anchor timestamp in the <em>Sequence Reconstruction</em> panel to order the
-            remaining events.
-          </div>
-        </div>
       </section>
 
-      <section className="section-block announcement-section">
+      {rulesModalOpen && (
+        <div
+          className="arena-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mission-rules-title"
+          onClick={() => setRulesModalOpen(false)}
+        >
+          <div
+            className="arena-modal-card dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="arena-modal-head">
+              <div>
+                <div className="eyebrow">MISSION BRIEFING · ARENA PROTOCOL</div>
+                <h3 id="mission-rules-title">Mission Rules &amp; Scoring Guide</h3>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close mission rules"
+                onClick={() => setRulesModalOpen(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="arena-modal-grid">
+              <div className="arena-modal-panel">
+                <div className="rules-card-head">
+                  <span className="rules-num">01</span>
+                  <strong>Gameplay Steps</strong>
+                  <Compass size={15} className="rules-head-icon" />
+                </div>
+                <ul>
+                  <li>Register your single-player team with the event access code.</li>
+                  <li>Wait for the admin to start the arena, then choose Easy, Medium, or Hard cases.</li>
+                  <li>Inspect evidence logs, image clues, and suspect profiles before filing your verdict.</li>
+                  <li>On Hard cases, arrange all 4 Timeline events in chronological order.</li>
+                </ul>
+              </div>
+
+              <div className="arena-modal-panel">
+                <div className="rules-card-head">
+                  <span className="rules-num">02</span>
+                  <strong>Scoring Breakdown</strong>
+                  <Scale size={15} className="rules-head-icon" />
+                </div>
+                <ul>
+                  <li>
+                    <b className="text-emerald-400">Easy:</b> 50 PTS max (100% Answer Summary)
+                  </li>
+                  <li>
+                    <b className="text-amber-400">Medium:</b> 75 PTS max (100% Answer Summary)
+                  </li>
+                  <li>
+                    <b className="text-rose-400">Hard:</b> 100 PTS max (50 Timeline + 50 Summary)
+                  </li>
+                  <li>Naming only the single culprit + supporting clue earns full summary points; naming multiple culprits reduces score.</li>
+                </ul>
+              </div>
+
+              <div className="arena-modal-panel">
+                <div className="rules-card-head">
+                  <span className="rules-num">03</span>
+                  <strong>Hint Penalties (-5 PTS)</strong>
+                  <Clock3 size={15} className="rules-head-icon" />
+                </div>
+                <ul>
+                  <li>Each case includes up to 2 optional field hints.</li>
+                  <li>
+                    Every unlocked hint deducts <b className="text-amber-400">-5 PTS</b> from that case&apos;s final score.
+                  </li>
+                  <li>Each case has a 5-minute clock; the arena total clock is {configuredGameMinutes} minutes.</li>
+                </ul>
+              </div>
+
+              <div className="arena-modal-panel">
+                <div className="rules-card-head">
+                  <span className="rules-num">04</span>
+                  <strong>Fair Play Rules</strong>
+                  <Shield size={15} className="rules-head-icon" />
+                </div>
+                <ul>
+                  <li>One participant per registered team in a single browser tab.</li>
+                  <li>No browser DevTools inspection, server probing, or automated scripts.</li>
+                  <li>No cross-team answer sharing during active competition.</li>
+                  <li>All decisions by the Avon Event Coordinators are final.</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="arena-modal-actions">
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={() => setRulesModalOpen(false)}
+              >
+                <Check size={15} />
+                <span>Got it</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <section className="section-block announcement-section dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
         <div className="section-heading">
           <div>
             <div className="eyebrow">ARENA DISPATCHES</div>
@@ -2115,7 +2555,9 @@ function HomeView({
         {announcements.length ? (
           announcements.map((item) => (
             <article className="dispatch" key={item.id}>
-              <span className="dispatch-dot" />
+              <span className="dispatch-icon">
+                <Bell size={15} />
+              </span>
               <div>
                 <strong>{item.title}</strong>
                 <p>{item.message}</p>
@@ -2125,7 +2567,9 @@ function HomeView({
           ))
         ) : (
           <div className="dispatch empty-dispatch">
-            <span className="dispatch-dot" />
+            <span className="dispatch-icon">
+              <Radio size={15} />
+            </span>
             <div>
               <strong>All channels quiet</strong>
               <p>New event announcements will appear here.</p>
@@ -2134,7 +2578,7 @@ function HomeView({
           </div>
         )}
         <div className="slogan-line">
-          <Sparkles size={14} /> EVERY CLUE MATTERS · EVERY DECISION COUNTS
+          <Scale size={14} /> EVERY CLUE MATTERS · EVERY DECISION COUNTS
         </div>
       </section>
     </>
@@ -2148,6 +2592,8 @@ function DashboardView({
   completed,
   cases: caseList,
   hasLiveEvent,
+  isGamePaused,
+  isGameEnded,
   openCase,
   setPage,
 }: {
@@ -2157,6 +2603,8 @@ function DashboardView({
   completed: string[];
   cases: InvestigationCase[];
   hasLiveEvent: boolean;
+  isGamePaused: boolean;
+  isGameEnded: boolean;
   openCase: (c: InvestigationCase) => void;
   setPage: (p: PageName) => void;
 }) {
@@ -2169,7 +2617,7 @@ function DashboardView({
         description="A clear view of your team's investigations, progress, and standing in the arena."
         action={
           <button className="button button-primary" onClick={() => setPage('Play Investigation')}>
-            <Swords size={15} />
+            <FolderSearch size={15} />
             <span>Start an investigation</span>
           </button>
         }
@@ -2177,7 +2625,12 @@ function DashboardView({
       <div className="metric-grid">
         <Metric label="TEAM POINTS" value={teamScore} icon={Zap} accent="lime" />
         <Metric label="CASES CLOSED" value={completed.length} icon={Check} accent="cyan" />
-        <Metric label="TEAM RANK" value={myRank ? `#${myRank}` : '—'} icon={Trophy} accent="orange" />
+        <Metric
+          label="TEAM RANK"
+          value={myRank ? `#${myRank}` : '—'}
+          icon={Trophy}
+          accent="orange"
+        />
         <Metric
           label="TEAM STANDING"
           value={
@@ -2185,6 +2638,10 @@ function DashboardView({
               ? 'COMPLETED'
               : hasLiveEvent
               ? 'ACTIVE'
+              : isGameEnded
+              ? 'ENDED'
+              : isGamePaused
+              ? 'PAUSED'
               : 'STANDING BY'
           }
           icon={Shield}
@@ -2197,9 +2654,23 @@ function DashboardView({
           <div className="section-heading">
             <div>
               <div className="eyebrow">
-                {hasLiveEvent ? 'RECOMMENDED NEXT' : 'CASE ACCESS LOCKED'}
+                {hasLiveEvent
+                  ? 'RECOMMENDED NEXT'
+                  : isGameEnded
+                  ? 'EVENT ENDED · FINAL STANDINGS'
+                  : isGamePaused
+                  ? 'GAME PAUSED · TIMERS FROZEN'
+                  : 'CASE ACCESS LOCKED'}
               </div>
-              <h2>{hasLiveEvent ? nextCase.title : 'Waiting for admin start'}</h2>
+              <h2>
+                {hasLiveEvent
+                  ? nextCase.title
+                  : isGameEnded
+                  ? 'Game has ended'
+                  : isGamePaused
+                  ? 'Game paused by admin'
+                  : 'Waiting for admin start'}
+              </h2>
             </div>
           </div>
           {hasLiveEvent ? (
@@ -2211,13 +2682,31 @@ function DashboardView({
             />
           ) : (
             <div className="arena-gate-card">
+              <div className="archive-photo-backdrop" aria-hidden="true">
+                <img src={caseArchiveBackdropImg} alt="" referrerPolicy="no-referrer" />
+              </div>
               <span className="arena-gate-icon">
-                <LockKeyhole size={21} />
+                {isGameEnded ? (
+                  <Flag size={21} />
+                ) : isGamePaused ? (
+                  <Pause size={21} />
+                ) : (
+                  <LockKeyhole size={21} />
+                )}
               </span>
-              <h3>Case files hidden until game begins</h3>
+              <h3>
+                {isGameEnded
+                  ? 'This Cyber Mystery Arena session has ended'
+                  : isGamePaused
+                  ? 'Case files temporarily paused'
+                  : 'Case files hidden until game begins'}
+              </h3>
               <p>
-                Your team is registered and ready. All case files will unlock once the admin starts
-                the game.
+                {isGameEnded
+                  ? 'All case submissions are closed. Official standings are reviewed by event administrators.'
+                  : isGamePaused
+                  ? 'The administrator paused the live session. All timers are frozen and cases will unlock once resumed.'
+                  : 'Your team is registered and ready. All case files will unlock once the admin starts the game.'}
               </p>
             </div>
           )}
@@ -2265,7 +2754,11 @@ function CaseLibrary({
   completed,
   search,
   setSearch,
+  difficultyFilter,
+  setDifficultyFilter,
   hasLiveEvent,
+  isGamePaused,
+  isGameEnded,
   admin,
   setPage,
   onRefreshStatus,
@@ -2275,42 +2768,88 @@ function CaseLibrary({
   completed: string[];
   search: string;
   setSearch: (v: string) => void;
+  difficultyFilter: CaseDifficulty;
+  setDifficultyFilter: (d: CaseDifficulty) => void;
   hasLiveEvent: boolean;
+  isGamePaused: boolean;
+  isGameEnded: boolean;
   admin: boolean;
   setPage: (p: PageName) => void;
   onRefreshStatus: () => void;
 }) {
+
   if (!hasLiveEvent) {
     return (
       <>
         <PageHeading
-          eyebrow="ARENA WAITING ROOM · ADMIN CONTROLLED"
+          eyebrow={
+            isGameEnded
+              ? 'EVENT ENDED · FINAL STANDINGS'
+              : isGamePaused
+              ? 'ARENA PAUSED · TIMERS FROZEN'
+              : 'ARENA WAITING ROOM · ADMIN CONTROLLED'
+          }
           title="Play Investigation"
-          description="Case files are kept sealed until the organizer launches the live session from the Admin Console."
+          description={
+            isGameEnded
+              ? 'The administrator has ended the game. All case files are now closed.'
+              : isGamePaused
+              ? 'The administrator paused the live event. Case files are hidden and all clocks are paused.'
+              : 'Case files are kept sealed until the organizer launches the live session from the Admin Console.'
+          }
         />
 
         <div className="arena-gate-card">
+          <div className="archive-photo-backdrop" aria-hidden="true">
+            <img src={caseArchiveBackdropImg} alt="" referrerPolicy="no-referrer" />
+          </div>
           <span className="arena-gate-icon">
-            <LockKeyhole size={22} />
+            {isGameEnded ? (
+              <Flag size={22} />
+            ) : isGamePaused ? (
+              <Pause size={22} />
+            ) : (
+              <LockKeyhole size={22} />
+            )}
           </span>
-          <h2>Waiting for admin to start the game</h2>
+          <h2>
+            {isGameEnded
+              ? 'Game has ended'
+              : isGamePaused
+              ? 'Game paused by administrator'
+              : 'Waiting for admin to start the game'}
+          </h2>
           <p>
-            All {visibleCases.length} cyber mystery case files are currently hidden. Once the admin
-            clicks Start Game in the Admin Console, all cases will unlock here automatically.
+            {isGameEnded
+              ? 'This Cyber Mystery Arena event has concluded. Official team rankings are available inside the Admin Console.'
+              : isGamePaused
+              ? 'Case files are temporarily hidden and your game clock is paused. Once the admin resumes the game in the Admin Console, cases will unlock automatically with your remaining time intact.'
+              : 'Case files are currently hidden across Easy, Medium, and Hard tiers. Once the admin clicks Start Game in the Admin Console, cases will unlock here automatically.'}
           </p>
           <div className="arena-gate-actions">
-            <button type="button" className="button button-primary" onClick={onRefreshStatus}>
-              <Radio size={15} />
-              <span>Check game status</span>
-            </button>
+            {isGameEnded ? (
+              <button
+                type="button"
+                className={admin ? 'button button-outline' : 'button button-primary'}
+                onClick={() => setPage('Home')}
+              >
+                <Compass size={15} />
+                <span>Return Home</span>
+              </button>
+            ) : (
+              <button type="button" className="button button-primary" onClick={onRefreshStatus}>
+                <Radio size={15} />
+                <span>Check game status</span>
+              </button>
+            )}
             {admin && (
               <button
                 type="button"
-                className="button button-outline"
+                className={isGameEnded ? 'button button-primary' : 'button button-outline'}
                 onClick={() => setPage('Admin')}
               >
-                <Settings2 size={15} />
-                <span>Open Admin Console</span>
+                <SlidersHorizontal size={15} />
+                <span>{isGameEnded ? 'Open Admin Console & Leaderboard' : 'Open Admin Console'}</span>
               </button>
             )}
           </div>
@@ -2326,32 +2865,57 @@ function CaseLibrary({
     );
   }
 
-  const foundCases = visibleCases.filter((gameCase) =>
-    `${gameCase.id} ${gameCase.title} ${gameCase.subtitle} ${gameCase.category}`
+  const countByDifficulty: Record<CaseDifficulty, number> = {
+    Easy: visibleCases.filter((item) => item.difficulty === 'Easy').length,
+    Medium: visibleCases.filter((item) => item.difficulty === 'Medium').length,
+    Hard: visibleCases.filter((item) => item.difficulty === 'Hard').length,
+  };
+
+  const foundCases = visibleCases.filter((gameCase) => {
+    const matchesDifficulty = gameCase.difficulty === difficultyFilter;
+    const matchesSearch = `${gameCase.id} ${gameCase.title} ${gameCase.subtitle} ${gameCase.category} ${gameCase.difficulty}`
       .toLowerCase()
-      .includes(search.toLowerCase())
-  );
+      .includes(search.toLowerCase());
+    return matchesDifficulty && matchesSearch;
+  });
+
   return (
     <>
       <PageHeading
-        eyebrow={`CASE ARCHIVE · ${visibleCases.length} FILES`}
+        eyebrow={`CASE ARCHIVE · ${difficultyFilter.toUpperCase()} TIER`}
         title="Play Investigation"
-        description="Every case is a self-contained fictional simulation. Collect clues, connect the timeline, and submit your verdict."
+        description="Select Easy (50 pts), Medium (75 pts), or Hard (100 pts · Timeline Builder) investigations."
         action={
           <div className="case-total">
             <strong>{foundCases.length.toString().padStart(2, '0')}</strong>
-            <small>AVAILABLE FILES</small>
+            <small>{difficultyFilter.toUpperCase()} FILES</small>
           </div>
         }
       />
 
       <div className="library-tools">
+        <div className="difficulty-filter-row" role="tablist" aria-label="Select case difficulty">
+          {(['Easy', 'Medium', 'Hard'] as const).map((tier) => (
+            <button
+              key={tier}
+              type="button"
+              role="tab"
+              aria-selected={difficultyFilter === tier}
+              className={`difficulty-filter-btn ${difficultyFilter === tier ? 'is-active' : ''}`}
+              onClick={() => setDifficultyFilter(tier)}
+            >
+              <span>{tier}</span>
+              <small>{countByDifficulty[tier]}</small>
+            </button>
+          ))}
+        </div>
+
         <label className="search-box">
           <Search size={16} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search case files"
+            placeholder={`Search ${difficultyFilter.toLowerCase()} cases`}
             aria-label="Search case files"
           />
         </label>
@@ -2373,7 +2937,7 @@ function CaseLibrary({
         <EmptyState
           icon={Search}
           title="No case files found"
-          copy="Try another case title or category keyword."
+          copy="Try another case title, category keyword, or switch difficulty tier."
         />
       )}
 
@@ -2401,9 +2965,19 @@ function CaseTile({
   index?: number;
 }) {
   const Icon = iconByName[gameCase.icon] || Fingerprint;
+  const maxScore = getCaseMaxScore(gameCase.difficulty);
+  const difficultyBadgeTone =
+    gameCase.difficulty === 'Easy'
+      ? 'text-emerald-400'
+      : gameCase.difficulty === 'Medium'
+      ? 'text-amber-400'
+      : 'text-rose-400';
+
   return (
     <motion.button
-      className={`case-card ${featured ? 'case-featured' : ''} tone-${gameCase.color}`}
+      className={`case-card ${featured ? 'case-featured' : ''} ${
+        completed ? 'is-solved' : ''
+      } tone-${gameCase.color} dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20 hover:-translate-y-1 hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(20,184,166,0.15)]`}
       onClick={onClick}
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
@@ -2413,6 +2987,19 @@ function CaseTile({
         <span className="case-category">
           <Icon size={15} />
           <span>{gameCase.category}</span>
+        </span>
+        <span className="case-card-badges">
+          {completed && (
+            <span className="case-solved-indicator text-emerald-400">
+              <Check size={11} />
+              <span>SOLVED</span>
+            </span>
+          )}
+          <span
+            className={`case-difficulty-tag is-${gameCase.difficulty.toLowerCase()} ${difficultyBadgeTone}`}
+          >
+            {gameCase.difficulty.toUpperCase()} · {maxScore} PTS
+          </span>
         </span>
       </div>
 
@@ -2440,10 +3027,11 @@ function CaseTile({
           <FileText size={14} />
           {gameCase.evidence.length} EVIDENCE
         </span>
-        <span className="case-cta">
+        <span>{maxScore} PTS MAX</span>
+        <span className={`case-cta ${completed ? 'is-solved' : ''}`}>
           {completed ? (
             <>
-              <Check size={14} /> CLOSED
+              <Check size={14} /> SOLVED
             </>
           ) : featured ? (
             <>
@@ -2476,6 +3064,9 @@ function InvestigationView({
   gameTimer,
   configuredGameMinutes,
   gameExpired,
+  hasLiveEvent,
+  isGamePaused,
+  isGameEnded,
   result,
   submitCase,
   submissionBusy,
@@ -2496,12 +3087,32 @@ function InvestigationView({
   gameTimer: string;
   configuredGameMinutes: number;
   gameExpired: boolean;
+  hasLiveEvent: boolean;
+  isGamePaused: boolean;
+  isGameEnded: boolean;
   result: CaseScore | null;
   submitCase: (e: FormEvent) => void;
   submissionBusy: boolean;
   goTo: (p: PageName) => void;
 }) {
   const [activeTab, setActiveTab] = useState<'Evidence' | 'Suspects'>('Evidence');
+  const [zoomedImage, setZoomedImage] = useState<{
+    src: string;
+    title: string;
+    detail: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!zoomedImage) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setZoomedImage(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [zoomedImage]);
+
   const evidenceCollected = (id: number) => selectedEvidence.includes(id);
   const toggleEvidence = (id: number) => {
     setSelectedEvidence((current) =>
@@ -2513,6 +3124,9 @@ function InvestigationView({
       ? Math.round((selectedEvidence.length / activeCase.evidence.length) * 100)
       : 0;
   const Icon = iconByName[activeCase.icon] || Fingerprint;
+  const hasTimeline = activeCase.timeline.length > 0;
+  const caseMaxScore = getCaseMaxScore(activeCase.difficulty);
+  const summaryMax = hasTimeline ? 50 : caseMaxScore;
 
   return (
     <div className="investigation-layout">
@@ -2522,25 +3136,87 @@ function InvestigationView({
           <span>CASE ARCHIVE</span>
         </button>
         <div className="investigation-status">
-          {result ? 'CASE CLOSED' : 'CASE IN PROGRESS'}
+          {result
+            ? 'CASE CLOSED'
+            : !hasLiveEvent
+            ? isGameEnded
+              ? 'GAME ENDED · EVENT CLOSED'
+              : isGamePaused
+              ? 'GAME PAUSED · TIMERS FROZEN'
+              : 'GAME LOCKED'
+            : `CASE IN PROGRESS · ${activeCase.difficulty.toUpperCase()}`}
         </div>
         <div className="case-timers-group">
-          <div className={`case-timer ${caseExpired && !result ? 'is-expired' : ''}`}>
-            <Clock3 size={15} />
+          <div
+            className={`case-timer ${
+              !hasLiveEvent && !result
+                ? isGameEnded
+                  ? 'is-expired'
+                  : 'is-paused'
+                : caseExpired && !result
+                ? 'is-expired'
+                : ''
+            }`}
+          >
+            {!hasLiveEvent && !result ? (
+              isGameEnded ? (
+                <Square size={14} />
+              ) : (
+                <Pause size={15} />
+              )
+            ) : (
+              <Clock3 size={15} />
+            )}
             <strong>{timer}</strong>
-            <small>{caseExpired && !result ? 'CASE TIME UP' : 'CASE · 5 MIN'}</small>
+            <small>
+              {!hasLiveEvent && !result
+                ? isGameEnded
+                  ? 'GAME ENDED'
+                  : 'CASE PAUSED'
+                : caseExpired && !result
+                ? 'CASE TIME UP'
+                : 'CASE · 5 MIN'}
+            </small>
           </div>
-          <div className={`case-timer ${gameExpired ? 'is-expired' : ''}`}>
-            <Clock3 size={15} />
+          <div
+            className={`case-timer ${
+              !hasLiveEvent && !result
+                ? isGameEnded
+                  ? 'is-expired'
+                  : 'is-paused'
+                : gameExpired
+                ? 'is-expired'
+                : ''
+            }`}
+          >
+            {!hasLiveEvent && !result ? (
+              isGameEnded ? (
+                <Square size={14} />
+              ) : (
+                <Pause size={15} />
+              )
+            ) : (
+              <Clock3 size={15} />
+            )}
             <strong>{gameTimer}</strong>
-            <small>{gameExpired ? 'GAME ENDED' : `GAME · ${configuredGameMinutes} MIN`}</small>
+            <small>
+              {!hasLiveEvent && !result
+                ? isGameEnded
+                  ? 'GAME ENDED'
+                  : 'GAME PAUSED'
+                : gameExpired
+                ? 'GAME ENDED'
+                : `GAME · ${configuredGameMinutes} MIN`}
+            </small>
           </div>
         </div>
       </div>
 
       <div className="case-title-row">
         <div>
-          <div className="eyebrow">{activeCase.category.toUpperCase()}</div>
+          <div className="eyebrow">
+            {activeCase.category.toUpperCase()} · {activeCase.difficulty.toUpperCase()} LEVEL
+          </div>
           <h1>
             {activeCase.title}
             <span>:</span> {activeCase.subtitle}
@@ -2563,6 +3239,43 @@ function InvestigationView({
               gameCase={activeCase}
               onBack={() => goTo('Play Investigation')}
             />
+          ) : !hasLiveEvent ? (
+            <div className="arena-gate-card">
+              <div className="archive-photo-backdrop" aria-hidden="true">
+                <img src={caseArchiveBackdropImg} alt="" referrerPolicy="no-referrer" />
+              </div>
+              <span className="arena-gate-icon">
+                {isGameEnded ? (
+                  <Flag size={22} />
+                ) : isGamePaused ? (
+                  <Pause size={22} />
+                ) : (
+                  <LockKeyhole size={22} />
+                )}
+              </span>
+              <h2>
+                {isGameEnded
+                  ? 'Game has ended'
+                  : isGamePaused
+                  ? 'Game paused by administrator'
+                  : 'Case access locked'}
+              </h2>
+              <p>
+                {isGameEnded
+                  ? 'The administrator has ended this Cyber Mystery Arena session. Submissions are now closed.'
+                  : 'Case files are hidden and both timers are frozen while the game is paused. Your collected clues and draft report are saved and will resume once the admin restarts the live session.'}
+              </p>
+              <div className="arena-gate-actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => goTo('Play Investigation')}
+                >
+                  <ArrowLeft size={15} />
+                  <span>Back to Case Archive</span>
+                </button>
+              </div>
+            </div>
           ) : (
             <>
               <div className="briefing-card">
@@ -2604,21 +3317,58 @@ function InvestigationView({
                   <div className="evidence-grid">
                     {activeCase.evidence.map((item, index) => {
                       const picked = evidenceCollected(index);
+                      const EvidenceTypeIcon = evidenceIconForType(item.type);
                       return (
-                        <button
-                          type="button"
+                        <div
                           key={item.title}
+                          role="button"
+                          tabIndex={0}
+                          aria-pressed={picked}
                           className={`evidence-card ${picked ? 'evidence-picked' : ''}`}
                           onClick={() => toggleEvidence(index)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              toggleEvidence(index);
+                            }
+                          }}
                         >
                           <div className="evidence-meta">
-                            <span>{item.type}</span>
+                            <span className="evidence-meta-type">
+                              <EvidenceTypeIcon size={13} />
+                              <span>{item.type}</span>
+                            </span>
                             <span className="evidence-index">
                               E-{String(index + 1).padStart(2, '0')}
                             </span>
                           </div>
                           <strong>{item.title}</strong>
                           <p>{item.detail}</p>
+                          {item.image && (
+                            <div className="evidence-image-wrap">
+                              <img
+                                src={item.image}
+                                alt={item.title}
+                                className="evidence-thumb"
+                                loading="lazy"
+                              />
+                              <button
+                                type="button"
+                                className="evidence-zoom-btn"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setZoomedImage({
+                                    src: item.image!,
+                                    title: item.title,
+                                    detail: item.detail,
+                                  });
+                                }}
+                              >
+                                <ZoomIn size={13} />
+                                <span>Inspect image</span>
+                              </button>
+                            </div>
+                          )}
                           <span className="evidence-action">
                             {picked ? (
                               <>
@@ -2630,7 +3380,7 @@ function InvestigationView({
                               </>
                             )}
                           </span>
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -2719,13 +3469,17 @@ function InvestigationView({
               <form className="verdict-form" onSubmit={submitCase}>
                 <label className="report-field">
                   <span>
-                    SUMMARIZE THE ANSWER <small>50 PTS · 500 CHARACTERS</small>
+                    SUMMARIZE THE ANSWER <small>{summaryMax} PTS · 500 CHARACTERS</small>
                   </span>
                   <textarea
                     maxLength={500}
                     value={report}
                     onChange={(event) => setReport(event.target.value)}
-                    placeholder="Name the single culprit and summarize what they did (multiple culprit names reduce points · 50% of score)."
+                    placeholder={
+                      hasTimeline
+                        ? 'Name the single culprit and summarize what they did (multiple culprit names reduce points · 50% of score).'
+                        : 'Name the single culprit and summarize the decisive clue (100% of score · multiple culprit names reduce points).'
+                    }
                   />
                 </label>
 
@@ -2762,8 +3516,8 @@ function InvestigationView({
               </div>
               <div className="case-facts">
                 <div>
-                  <span>EVIDENCE FILES</span>
-                  <strong>{activeCase.evidence.length} ITEMS</strong>
+                  <span>DIFFICULTY · MAX SCORE</span>
+                  <strong>{activeCase.difficulty.toUpperCase()} · {caseMaxScore} PTS</strong>
                 </div>
                 <div>
                   <span>CASE / GAME LIMIT</span>
@@ -2771,7 +3525,9 @@ function InvestigationView({
                 </div>
                 <div>
                   <span>SCORING SPLIT</span>
-                  <strong>50 SUMMARY + 50 SEQUENCE</strong>
+                  <strong>
+                    {hasTimeline ? '50 SUMMARY + 50 SEQUENCE' : `100% SUMMARY (${summaryMax} PTS)`}
+                  </strong>
                 </div>
                 <div>
                   <span>HINT PENALTY</span>
@@ -2780,45 +3536,47 @@ function InvestigationView({
               </div>
             </div>
 
-            <div className="side-panel timeline-panel">
-              <div className="side-panel-heading">
-                <div>
-                  <span className="eyebrow">SEQUENCE RECONSTRUCTION</span>
-                  <h3>Timeline builder</h3>
+            {hasTimeline && (
+              <div className="side-panel timeline-panel">
+                <div className="side-panel-heading">
+                  <div>
+                    <span className="eyebrow">SEQUENCE RECONSTRUCTION</span>
+                    <h3>Timeline builder</h3>
+                  </div>
+                  <Activity size={17} />
                 </div>
-                <Activity size={17} />
+                <p className="timeline-help">
+                  Use the arrows to arrange events chronologically (50 pts total ·{' '}
+                  {Number((50 / Math.max(1, timelineOrder.length)).toFixed(1))} pts each).
+                </p>
+                <ol className="timeline-list">
+                  {timelineOrder.map((event, index) => (
+                    <li key={`${event}-${index}`}>
+                      <span className="timeline-index">{String(index + 1).padStart(2, '0')}</span>
+                      <span className="timeline-text">{event}</span>
+                      <span className="timeline-controls">
+                        <button
+                          type="button"
+                          aria-label={`Move ${event} earlier`}
+                          disabled={index === 0}
+                          onClick={() => shiftTimeline(index, -1)}
+                        >
+                          <ArrowLeft size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Move ${event} later`}
+                          disabled={index === timelineOrder.length - 1}
+                          onClick={() => shiftTimeline(index, 1)}
+                        >
+                          <ArrowRight size={13} />
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
               </div>
-              <p className="timeline-help">
-                Use the arrows to arrange events chronologically (50 pts total ·{' '}
-                {Number((50 / Math.max(1, timelineOrder.length)).toFixed(1))} pts each).
-              </p>
-              <ol className="timeline-list">
-                {timelineOrder.map((event, index) => (
-                  <li key={`${event}-${index}`}>
-                    <span className="timeline-index">{String(index + 1).padStart(2, '0')}</span>
-                    <span className="timeline-text">{event}</span>
-                    <span className="timeline-controls">
-                      <button
-                        type="button"
-                        aria-label={`Move ${event} earlier`}
-                        disabled={index === 0}
-                        onClick={() => shiftTimeline(index, -1)}
-                      >
-                        <ArrowLeft size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Move ${event} later`}
-                        disabled={index === timelineOrder.length - 1}
-                        onClick={() => shiftTimeline(index, 1)}
-                      >
-                        <ArrowRight size={13} />
-                      </button>
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            </div>
+            )}
 
             <div className="side-safe-note">
               <Shield size={15} />
@@ -2829,6 +3587,37 @@ function InvestigationView({
           </aside>
         )}
       </div>
+
+      {zoomedImage && (
+        <div
+          className="image-lightbox-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Inspect evidence: ${zoomedImage.title}`}
+          onClick={() => setZoomedImage(null)}
+        >
+          <div className="image-lightbox-card" onClick={(event) => event.stopPropagation()}>
+            <div className="image-lightbox-head">
+              <div>
+                <div className="eyebrow">VISUAL EVIDENCE INSPECTION</div>
+                <h3>{zoomedImage.title}</h3>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close zoomed image"
+                onClick={() => setZoomedImage(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="image-lightbox-body">
+              <img src={zoomedImage.src} alt={zoomedImage.title} />
+            </div>
+            <p className="image-lightbox-caption">{zoomedImage.detail}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2842,15 +3631,21 @@ function ResultPanel({
   gameCase: InvestigationCase;
   onBack: () => void;
 }) {
+  const hasTimeline = (result.totalTimeline ?? gameCase.timeline.length) > 0;
+  const caseMaxScore = result.maxScore ?? getCaseMaxScore(gameCase.difficulty);
+  const summaryMax = hasTimeline ? 50 : caseMaxScore;
+
   return (
     <section className="result-panel">
       <div className="result-mark">
         <Trophy size={26} />
       </div>
-      <div className="eyebrow">VERDICT VERIFIED · CASE CLOSED</div>
+      <div className="eyebrow">
+        VERDICT VERIFIED · CASE CLOSED ({gameCase.difficulty.toUpperCase()})
+      </div>
       <h2>
         {result.score ?? 0}
-        <span> / 100</span>
+        <span> / {caseMaxScore}</span>
       </h2>
       <p>{result.message || 'Your investigation has been checked by the arena.'}</p>
 
@@ -2861,19 +3656,21 @@ function ResultPanel({
         </div>
         {typeof result.summaryScore === 'number' && (
           <div>
-            <span>ANSWER SUMMARY (50%)</span>
-            <strong>{result.summaryScore} / 50</strong>
+            <span>ANSWER SUMMARY ({hasTimeline ? '50 PTS' : `${summaryMax} PTS`})</span>
+            <strong>
+              {result.summaryScore} / {summaryMax}
+            </strong>
           </div>
         )}
-        {typeof result.sequenceScore === 'number' && (
+        {hasTimeline && typeof result.sequenceScore === 'number' && (
           <div>
-            <span>SEQUENCE (50%)</span>
+            <span>SEQUENCE (50 PTS)</span>
             <strong>{result.sequenceScore} / 50</strong>
           </div>
         )}
         <div>
-          <span>RANKING</span>
-          <strong>{result.rank ? `#${result.rank}` : 'Leaderboard updated'}</strong>
+          <span>VERDICT STATUS</span>
+          <strong>SCORE RECORDED</strong>
         </div>
         <div>
           <span>HINTS USED</span>
@@ -2928,226 +3725,6 @@ function ResultPanel({
   );
 }
 
-function LeaderboardView({
-  filteredScores,
-  totalTeams,
-  search,
-  setSearch,
-  myRank,
-  myTeamEntry,
-  exportResults,
-  admin,
-}: {
-  filteredScores: RankingEntry[];
-  totalTeams: number;
-  search: string;
-  setSearch: (v: string) => void;
-  myRank: number;
-  myTeamEntry: RankingEntry | null;
-  exportResults: () => void;
-  admin: boolean;
-}) {
-  if (!admin) {
-    return (
-      <>
-        <PageHeading
-          eyebrow="TEAM STANDING · PARTICIPANT VIEW"
-          title="Leaderboard"
-          description="Only your team's current rank is shown here. Full standings are visible to administrators."
-        />
-
-        <section className="leaderboard-table-wrap">
-          <div className="table-heading">
-            <div>
-              <span className="eyebrow">YOUR TEAM STANDING</span>
-              <h2>
-                Personal rank{' '}
-                <small>
-                  {myRank ? `#${myRank} of ${Math.max(1, totalTeams)} ranked` : 'Not ranked yet'}
-                </small>
-              </h2>
-            </div>
-            <span className="current-rank">
-              <Trophy size={15} />
-              TEAM RANK <b>{myRank ? `#${myRank}` : '—'}</b>
-            </span>
-          </div>
-
-          {myTeamEntry && myRank > 0 ? (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>RANK</th>
-                    <th>TEAM</th>
-                    <th>SCORE</th>
-                    <th>TIME</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>
-                      <span className={`rank-number ${myRank <= 3 ? 'top-rank' : ''}`}>
-                        {String(myRank).padStart(2, '0')}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="table-player">
-                        <span className="table-avatar">
-                          {(myTeamEntry.teamName || '?').slice(0, 1).toUpperCase()}
-                        </span>
-                        {myTeamEntry.teamName || 'Team'}
-                      </span>
-                    </td>
-                    <td className="score-cell">
-                      {myTeamEntry.score || 0}
-                      <small> PTS</small>
-                    </td>
-                    <td className="tabular-cell">
-                      {myTeamEntry.elapsedSeconds
-                        ? `${Math.floor(myTeamEntry.elapsedSeconds / 60)}:${String(
-                            myTeamEntry.elapsedSeconds % 60
-                          ).padStart(2, '0')}`
-                        : '—'}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <EmptyState
-              icon={Trophy}
-              title="No verified score for your team yet"
-              copy="Submit at least one case verdict to receive your team's official rank."
-            />
-          )}
-        </section>
-      </>
-    );
-  }
-
-  const podium = filteredScores.slice(0, 3);
-  return (
-    <>
-      <PageHeading
-        eyebrow="LIVE RANKINGS · ADMINISTRATOR VIEW"
-        title="Leaderboard"
-        description="Full arena standings and Excel export available to administrators."
-        action={
-          <button className="button button-outline" onClick={exportResults}>
-            <ArrowDown size={15} />
-            <span>Export Excel (.xlsx)</span>
-          </button>
-        }
-      />
-
-      <div className="leaderboard-controls">
-        <label className="search-box">
-          <Search size={16} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Find team"
-            aria-label="Search teams"
-          />
-        </label>
-        <span className="live-updating">LIVE UPDATING</span>
-      </div>
-
-      {podium.length > 0 && (
-        <div className="podium-grid">
-          {[podium[1], podium[0], podium[2]].filter(Boolean).map((team) => {
-            const actualIndex = filteredScores.findIndex((entry) => entry.id === team.id);
-            const rank = actualIndex + 1;
-            return (
-              <div className={`podium-card podium-${rank}`} key={team.id}>
-                <span className="podium-crown">
-                  {rank === 1 ? <Trophy size={18} /> : `0${rank}`}
-                </span>
-                <div className="podium-avatar">
-                  {(team.teamName || '?').slice(0, 1).toUpperCase()}
-                </div>
-                <strong>{team.teamName || 'Team'}</strong>
-                <small>ARENA TEAM</small>
-                <b>
-                  {team.score || 0}
-                  <small> PTS</small>
-                </b>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <section className="leaderboard-table-wrap">
-        <div className="table-heading">
-          <div>
-            <span className="eyebrow">ARENA STANDINGS</span>
-            <h2>
-              Team rankings <small>{filteredScores.length} entries</small>
-            </h2>
-          </div>
-          <span className="current-rank">
-            <Trophy size={15} />
-            TEAM RANK <b>{myRank ? `#${myRank}` : '—'}</b>
-          </span>
-        </div>
-
-        {filteredScores.length ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>RANK</th>
-                  <th>TEAM</th>
-                  <th>SCORE</th>
-                  <th>TIME</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredScores.map((team, index) => (
-                  <tr key={team.id}>
-                    <td>
-                      <span className={`rank-number ${index < 3 ? 'top-rank' : ''}`}>
-                        {String(index + 1).padStart(2, '0')}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="table-player">
-                        <span className="table-avatar">
-                          {(team.teamName || '?').slice(0, 1).toUpperCase()}
-                        </span>
-                        {team.teamName || 'Team'}
-                      </span>
-                    </td>
-                    <td className="score-cell">
-                      {team.score || 0}
-                      <small> PTS</small>
-                    </td>
-                    <td className="tabular-cell">
-                      {team.elapsedSeconds
-                        ? `${Math.floor(team.elapsedSeconds / 60)}:${String(
-                            team.elapsedSeconds % 60
-                          ).padStart(2, '0')}`
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState
-            icon={Trophy}
-            title="No verified scores yet"
-            copy="Complete an investigation and your team score will appear here."
-          />
-        )}
-      </section>
-    </>
-  );
-}
-
 function HistoryView({
   completed,
   cases: caseList,
@@ -3190,6 +3767,8 @@ function HistoryView({
 function AdminView({
   admin,
   hasLiveEvent,
+  isGamePaused,
+  isGameEnded,
   configuredGameMinutes,
   games,
   leaderboard,
@@ -3199,9 +3778,12 @@ function AdminView({
   unlockAdmin,
   lockAdmin,
   refreshArenaData,
+  onNewGameCreated,
 }: {
   admin: boolean;
   hasLiveEvent: boolean;
+  isGamePaused: boolean;
+  isGameEnded: boolean;
   configuredGameMinutes: number;
   games: GameLobby[];
   leaderboard: RankingEntry[];
@@ -3211,19 +3793,46 @@ function AdminView({
   unlockAdmin: (passcode: string) => Promise<void>;
   lockAdmin: () => void;
   refreshArenaData: () => Promise<void>;
+  onNewGameCreated: () => void;
 }) {
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
   const [durationInput, setDurationInput] = useState<string>(String(configuredGameMinutes));
   const [launchBusy, setLaunchBusy] = useState(false);
+  const [confirmPauseOpen, setConfirmPauseOpen] = useState(false);
+  const [confirmEndOpen, setConfirmEndOpen] = useState(false);
   const [announceBusy, setAnnounceBusy] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [unlockError, setUnlockError] = useState('');
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
+  const [leaderSearch, setLeaderSearch] = useState('');
+
+  const filteredLeaderboard = useMemo(
+    () =>
+      leaderboard.filter(
+        (score) =>
+          score.mode === 'Team' &&
+          `${score.teamName || ''}`.toLowerCase().includes(leaderSearch.toLowerCase())
+      ),
+    [leaderboard, leaderSearch]
+  );
+  const podium = filteredLeaderboard.slice(0, 3);
 
   useEffect(() => {
     setDurationInput(String(configuredGameMinutes));
   }, [configuredGameMinutes]);
+
+  useEffect(() => {
+    if (!confirmPauseOpen && !confirmEndOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setConfirmPauseOpen(false);
+        setConfirmEndOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [confirmPauseOpen, confirmEndOpen]);
 
   const handleAdminError = useCallback(
     (error: unknown, fallback: string) => {
@@ -3300,6 +3909,7 @@ function AdminView({
       await Promise.all(
         olderGames.map((game) => invoke('adminSetGameStatus', { gameId: game.id, status: 'ended' }))
       );
+      onNewGameCreated();
     }
     setDurationInput(String(mins));
     setNotice(announcementLabel.replace('{mins}', String(mins)));
@@ -3328,6 +3938,24 @@ function AdminView({
       setLaunchBusy(false);
     }
   };
+
+  const endArenaGame = async () => {
+    setLaunchBusy(true);
+    try {
+      const activeGames = games.filter((game) => game.status !== 'ended');
+      await Promise.all(
+        activeGames.map((game) => invoke('adminSetGameStatus', { gameId: game.id, status: 'ended' }))
+      );
+      setNotice('Game ended. All case files are closed and standings are finalized.');
+      await refreshArenaData();
+    } catch (error) {
+      handleAdminError(error, 'Unable to end the game.');
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
+
+  const hasEndableGame = games.some((game) => game.status !== 'ended');
 
   const updateLiveDuration = async () => {
     const mins = clampGameDurationMinutes(durationInput, configuredGameMinutes);
@@ -3413,19 +4041,40 @@ function AdminView({
         }
       />
 
-      <div className={`admin-launch-banner ${hasLiveEvent ? 'is-live' : ''}`}>
+      <div
+        className={`admin-launch-banner ${
+          hasLiveEvent ? 'is-live' : ''
+        } dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20`}
+      >
+        <div className="archive-photo-backdrop" aria-hidden="true">
+          <img src={caseArchiveBackdropImg} alt="" referrerPolicy="no-referrer" />
+        </div>
         <div>
           <div className="eyebrow">
-            {hasLiveEvent ? 'GAME LIVE · PARTICIPANT ACCESS OPEN' : 'GAME LOCKED · WAITING TO START'}
+            {hasLiveEvent
+              ? 'GAME LIVE · PARTICIPANT ACCESS OPEN'
+              : isGameEnded
+              ? 'GAME ENDED · EVENT CLOSED'
+              : isGamePaused
+              ? 'GAME PAUSED · TIMERS FROZEN'
+              : 'GAME LOCKED · WAITING TO START'}
           </div>
           <h2>
             {hasLiveEvent
               ? `All 30 case files are visible (${configuredGameMinutes} min game)`
+              : isGameEnded
+              ? 'Game ended — standings finalized'
+              : isGamePaused
+              ? `Game paused — cases hidden & timers stopped (${parsedDurationInput}m)`
               : `Set total game time (${parsedDurationInput} min) and start`}
           </h2>
           <p>
             {hasLiveEvent
               ? `Participants have ${configuredGameMinutes} minutes total (5 min per case). You can adjust total time below anytime.`
+              : isGameEnded
+              ? 'All case files are closed for this event. Export results or start a new game below.'
+              : isGamePaused
+              ? 'Participant timers are frozen and cases are sealed. Click Resume game to continue or End game to close the event.'
               : 'Choose the total arena duration in minutes, then click Start game to unlock all cases.'}
           </p>
         </div>
@@ -3475,17 +4124,38 @@ function AdminView({
               type="button"
               className={`button ${hasLiveEvent ? 'button-outline' : 'button-primary'}`}
               disabled={launchBusy}
-              onClick={() => void toggleArenaLaunch()}
+              onClick={() => {
+                if (hasLiveEvent) {
+                  setConfirmPauseOpen(true);
+                } else {
+                  void toggleArenaLaunch();
+                }
+              }}
             >
-              {hasLiveEvent ? <Clock3 size={15} /> : <Zap size={15} />}
+              {hasLiveEvent ? <Pause size={15} /> : <Zap size={15} />}
               <span>
                 {launchBusy
                   ? 'Updating...'
                   : hasLiveEvent
                   ? 'Pause game & hide cases'
+                  : isGamePaused
+                  ? `Resume game (${parsedDurationInput}m)`
+                  : isGameEnded
+                  ? `Start new game (${parsedDurationInput}m)`
                   : `Start game (${parsedDurationInput}m)`}
               </span>
             </button>
+            {hasEndableGame && (
+              <button
+                type="button"
+                className="button button-warning"
+                disabled={launchBusy}
+                onClick={() => setConfirmEndOpen(true)}
+              >
+                <Square size={14} />
+                <span>{launchBusy ? 'Ending...' : 'End game'}</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -3494,7 +4164,7 @@ function AdminView({
         <Metric label="REGISTERED TEAMS" value={teams.length || '—'} icon={Users} accent="cyan" />
         <Metric
           label="ARENA STATUS"
-          value={hasLiveEvent ? 'LIVE' : 'LOCKED'}
+          value={hasLiveEvent ? 'LIVE' : isGameEnded ? 'ENDED' : isGamePaused ? 'PAUSED' : 'LOCKED'}
           icon={Radio}
           accent="lime"
         />
@@ -3506,8 +4176,132 @@ function AdminView({
         />
       </div>
 
+      <section
+        className="admin-leaderboard-section"
+        aria-labelledby="admin-leaderboard-heading"
+      >
+        <div className="leaderboard-controls">
+          <label className="search-box">
+            <Search size={16} />
+            <input
+              value={leaderSearch}
+              onChange={(event) => setLeaderSearch(event.target.value)}
+              placeholder="Filter teams on leaderboard"
+              aria-label="Filter teams on leaderboard"
+            />
+          </label>
+          <div className="admin-leaderboard-actions">
+            <span className="live-updating">LIVE UPDATING</span>
+            <button type="button" className="button button-outline" onClick={exportResults}>
+              <ArrowDown size={15} />
+              <span>Export Excel (.xlsx)</span>
+            </button>
+          </div>
+        </div>
+
+        {podium.length > 0 && (
+          <div className="podium-grid">
+            {[podium[1], podium[0], podium[2]].filter(Boolean).map((team) => {
+              const actualIndex = filteredLeaderboard.findIndex((entry) => entry.id === team.id);
+              const rank = actualIndex + 1;
+              return (
+                <div className={`podium-card podium-${rank}`} key={team.id}>
+                  <span className="podium-crown">
+                    {rank === 1 ? <Trophy size={18} /> : `0${rank}`}
+                  </span>
+                  <div className="podium-avatar">
+                    {(team.teamName || '?').slice(0, 1).toUpperCase()}
+                  </div>
+                  <strong>{team.teamName || 'Team'}</strong>
+                  <small>
+                    {Object.keys(team.caseScores || {}).length} CASE
+                    {Object.keys(team.caseScores || {}).length === 1 ? '' : 'S'}
+                  </small>
+                  <b>
+                    {team.score || 0}
+                    <small> PTS</small>
+                  </b>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="leaderboard-table-wrap dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+          <div className="table-heading">
+            <div>
+              <span className="eyebrow">ADMINISTRATOR ONLY · LIVE STANDINGS</span>
+              <h2 id="admin-leaderboard-heading">
+                Leaderboard <small>{filteredLeaderboard.length} entries</small>
+              </h2>
+            </div>
+            <span className="current-rank">
+              <Trophy size={15} />
+              TOTAL RANKED{' '}
+              <b>{leaderboard.filter((entry) => entry.mode === 'Team').length}</b>
+            </span>
+          </div>
+
+          {filteredLeaderboard.length ? (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>RANK</th>
+                    <th>TEAM</th>
+                    <th>CASES</th>
+                    <th>SCORE</th>
+                    <th>TIME</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredLeaderboard.map((team, index) => {
+                    const solvedCount = Object.keys(team.caseScores || {}).length;
+                    return (
+                      <tr key={team.id}>
+                        <td>
+                          <span className={`rank-number ${index < 3 ? 'top-rank' : ''}`}>
+                            {String(index + 1).padStart(2, '0')}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="table-player">
+                            <span className="table-avatar">
+                              {(team.teamName || '?').slice(0, 1).toUpperCase()}
+                            </span>
+                            {team.teamName || 'Team'}
+                          </span>
+                        </td>
+                        <td className="tabular-cell">{solvedCount}</td>
+                        <td className="score-cell">
+                          {team.score || 0}
+                          <small> PTS</small>
+                        </td>
+                        <td className="tabular-cell">
+                          {team.elapsedSeconds
+                            ? `${Math.floor(team.elapsedSeconds / 60)}:${String(
+                                team.elapsedSeconds % 60
+                              ).padStart(2, '0')}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState
+              icon={Trophy}
+              title="No verified team scores yet"
+              copy="Scores appear here live as participants submit case verdicts."
+            />
+          )}
+        </div>
+      </section>
+
       <div className="admin-grid">
-        <section className="section-block admin-block">
+        <section className="section-block admin-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <div className="section-heading">
             <div>
               <div className="eyebrow">TEAM ROSTER</div>
@@ -3532,7 +4326,7 @@ function AdminView({
           )}
         </section>
 
-        <section className="section-block admin-block">
+        <section className="section-block admin-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
           <div className="section-heading">
             <div>
               <div className="eyebrow">ARENA DISPATCHES</div>
@@ -3570,6 +4364,123 @@ function AdminView({
           </form>
         </section>
       </div>
+
+      {confirmPauseOpen && (
+        <div
+          className="arena-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-pause-title"
+          onClick={() => setConfirmPauseOpen(false)}
+        >
+          <div
+            className="arena-modal-card is-compact dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="arena-modal-head">
+              <div>
+                <div className="eyebrow">CONFIRM LIVE ACTION</div>
+                <h3 id="confirm-pause-title">Pause game &amp; hide all cases?</h3>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Cancel pause confirmation"
+                onClick={() => setConfirmPauseOpen(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="muted-copy">
+              Participants will immediately lose access to all 30 case files and all timers will
+              freeze until you resume the game from this console.
+            </p>
+
+            <div className="arena-modal-actions">
+              <button
+                type="button"
+                className="button button-outline"
+                disabled={launchBusy}
+                onClick={() => setConfirmPauseOpen(false)}
+              >
+                <span>Cancel</span>
+              </button>
+              <button
+                type="button"
+                className="button button-warning"
+                disabled={launchBusy}
+                onClick={() => {
+                  setConfirmPauseOpen(false);
+                  void toggleArenaLaunch();
+                }}
+              >
+                <ShieldAlert size={15} />
+                <span>{launchBusy ? 'Pausing...' : 'Confirm pause'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmEndOpen && (
+        <div
+          className="arena-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-end-title"
+          onClick={() => setConfirmEndOpen(false)}
+        >
+          <div
+            className="arena-modal-card is-compact dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="arena-modal-head">
+              <div>
+                <div className="eyebrow">FINALIZE EVENT</div>
+                <h3 id="confirm-end-title">End the current game?</h3>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Cancel end game confirmation"
+                onClick={() => setConfirmEndOpen(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="muted-copy">
+              This closes the active game session, locks all case files for participants, stops
+              every timer, and finalizes current leaderboard standings. You can start a new game
+              afterward.
+            </p>
+
+            <div className="arena-modal-actions">
+              <button
+                type="button"
+                className="button button-outline"
+                disabled={launchBusy}
+                onClick={() => setConfirmEndOpen(false)}
+              >
+                <span>Cancel</span>
+              </button>
+              <button
+                type="button"
+                className="button button-warning"
+                disabled={launchBusy}
+                onClick={() => {
+                  setConfirmEndOpen(false);
+                  void endArenaGame();
+                }}
+              >
+                <Square size={14} />
+                <span>{launchBusy ? 'Ending...' : 'Confirm end game'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -3586,7 +4497,7 @@ function Metric({
   accent: 'lime' | 'cyan' | 'orange' | 'blue';
 }) {
   return (
-    <div className={`metric-card metric-${accent}`}>
+    <div className={`metric-card metric-${accent} dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20`}>
       <span className="metric-icon">
         <Icon size={17} />
       </span>

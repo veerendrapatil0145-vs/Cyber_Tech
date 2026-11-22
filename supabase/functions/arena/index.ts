@@ -48,368 +48,304 @@ const caseAnswerKeys: Record<
   string,
   { correctTimeline: string[]; debriefNotes: string[]; maxHints?: number }
 > = {
+  // =========================================================================
+  // LEVEL 1: EASY CASES (01 - 05 • NO TIMELINE BUILDER)
+  // =========================================================================
   'case-01': {
     maxHints: 2,
-    correctTimeline: [
-      'Lab Assistant Aarav scans his biometric ID and leaves the CS block.',
-      'Rohan sits near the canteen Wi-Fi router and opens his Windows laptop.',
-      '11:42 PM: The OS mid-semester question paper PDF is downloaded from the HOD portal.',
-      'The leaked question paper appears on a public Telegram channel.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Rohan — Connected to campus local Wi-Fi (192.168.14.88) at the canteen on a Windows laptop at the exact download timestamp.',
-      'DHCP logs assign 192.168.14.1–254 exclusively to Campus & Hostel Wi-Fi, while Sneha pushed from a MacBook (MacIntel).',
+      'Culprit: Kiran — Left his coffee-stained red IEEE lanyard right beside the tampered registration laptop.',
+      'Only IEEE Executive Committee members wear red lanyards, matching Kiran’s statement about spilling coffee on his red lanyard at the registration desk.',
     ],
   },
   'case-02': {
     maxHints: 2,
-    correctTimeline: [
-      'Karthik accidentally pushes his secret GitHub access token inside the .env file.',
-      '02:15 AM: Vikram borrows a 65W laptop charger from the volunteer desk.',
-      "Vikram clones the leading team's repository and copies their secret token.",
-      "The team's main code branch is wiped clean using a force push.",
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Vikram — Lied about not having a charger, cloned the repo at 03:12 AM, and used Karthik's leaked PAT in .env to force-push wipe the code.",
-      'Volunteer desk logs confirm Vikram borrowed a 65W USB-C charger at 02:15 AM and returned it at 03:45 AM.',
+      'Culprit: Chirag — Paired his Samsung S23 to the stage speaker and dropped his phone case behind the curtain.',
+      'The speaker paired log records Last Connected Device "Chirag_S23" at 10:42 AM, matching the dropped black Samsung S23 silicone case.',
     ],
   },
   'case-03': {
     maxHints: 2,
-    correctTimeline: [
-      'Class Rep Rahul collects the attendance sheets and hands them to Prof. Sharma.',
-      "04:05 PM: Someone tries to log into Prof. Sharma's ERP account twice with the wrong password.",
-      'The attacker resets the password using the pet name "Bruno" from a browser with CR bookmarks.',
-      "Aditya's attendance is manually updated from 42% to 85% in the database.",
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Rahul — Used OSINT from Prof. Sharma\'s Instagram ("Bruno") to reset the password and modified Aditya\'s attendance using his CR laptop.',
-      'Browser bookmarks BEC_CR_Notices and Attendance_Upload tied the reset directly to the Class Representative browser profile.',
+      'Culprit: Rohan — Dropped his 1:20 PM canteen receipt right under the judges’ table.',
+      'The Canteen Counter Register confirms only Rohan ordered 2x Paneer Puff + 1x Mango Juice at 01:20 PM.',
     ],
   },
   'case-04': {
     maxHints: 2,
-    correctTimeline: [
-      'Pooja submits her coding solution and walks over to the exit door.',
-      'Tanmay plugs in a blue USB drive and boots a live Linux OS right below the router.',
-      '09:14 PM: A flood of disconnect signals hits the lab Wi-Fi from a laptop within 3 meters of the router.',
-      'The lab Wi-Fi crashes and disconnects all 40 participants.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Tanmay — Sat directly beneath the router and booted a Kali Live USB (98:E7:F4:22:10:8A) to jam the Wi-Fi.',
-      'Signal strength (-32 dBm) places the source within 3 meters of AP-LAB04, matching Desk A1 on Lab-04 CCTV.',
+      'Culprit: Manoj — Dropped his personal USB drive containing Manoj_Sem1_Notes right under the lobby TV.',
+      'The lobby TV media history shows cartoon_prank.mp4 played from External USB right beside the dropped blue SanDisk drive.',
     ],
   },
   'case-05': {
     maxHints: 2,
-    correctTimeline: [
-      'Manoj logs into the Canteen Free Wi-Fi on his device.',
-      '01:45 PM: The fake lookalike website bec-placemnts.in is registered online.',
-      'Fake internship shortlist emails are sent out to students from the canteen IP address.',
-      'Manoj messages the class group telling everyone to open the link quickly.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Manoj — Registered the typosquatted domain and dispatched the phishing emails from Canteen Wi-Fi before hyping the link on WhatsApp.',
-      "Both the WHOIS handle (dev_manoj99) and X-Originating-IP (103.21.58.190) match Manoj's canteen Wi-Fi session.",
+      'Culprit: Tarun — Dropped his signed green-ink reminder note right beneath the Wi-Fi router shelf.',
+      'The handwritten note is signed "Tarun" in green ink, matching the Decoration Team’s green gel pens.',
     ],
   },
+
+  // =========================================================================
+  // LEVEL 2: MEDIUM CASES (06 - 15 • NO TIMELINE BUILDER)
+  // =========================================================================
   'case-06': {
     maxHints: 2,
-    correctTimeline: [
-      'The Deep Learning lab officially closes and the biometric door locks for the night.',
-      '08:45 PM: Nithin logs into LAB-GPU-03 remotely over SSH using his student ID.',
-      'A hidden mining script starts running in the background and pushes GPU usage to 99%.',
-      'The server temperature crosses 88°C and triggers a thermal overheat alert.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Nithin — Logged in from his own hostel IP (172.16.5.44) and deployed the miner under his own user account before feigning ignorance on Slack.',
-      'The file owner (dev_nithin) and birth timestamp (20:47:08) align with his SSH login two minutes earlier.',
+      'Culprit: Rohan — Showed a doctored/reused screenshot (85% battery) while his actual phone was dying at 9% battery on CCTV.',
+      'The UPI screenshot image displays 85% battery and "From: Ritesh Luppatti", contradicting Food Stall CCTV showing Rohan’s phone at 9% battery and zero ₹1,200 bank credit.',
     ],
   },
   'case-07': {
     maxHints: 2,
-    correctTimeline: [
-      "Kiran uses his laptop inside the library to inspect the quiz website's network requests.",
-      '03:58 PM: Kiran sends a fake POST request claiming a perfect score of 100/100 in just 4 seconds.',
-      'The server accepts the unverified score and puts Kiran at #1 on the leaderboard.',
-      'The online quiz timer ends and the final results lock.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Kiran — Intercepted the submission endpoint in the library and sent a forged POST request via Postman to claim 100/100.',
-      'Both the API gateway User-Agent (PostmanRuntime/7.39) and Library Wi-Fi IP (10.20.4.18) match Kiran.',
+      "Culprit: Ananya — The yellow mug and blue notebook reflected in the leaked laptop photo match Ananya's study desk story.",
+      "Zooming into the dark laptop screen reflection reveals a yellow ceramic mug and blue spiral notebook matching Ananya's 04:00 PM Instagram story.",
     ],
   },
   'case-08': {
     maxHints: 2,
-    correctTimeline: [
-      'Treasurer Varun leaves his unlocked laptop on the fest desk while going to buy tea.',
-      "Pranav sits at Varun's laptop and adds a fake vendor account in the payment portal.",
-      "10:05 AM: Pranav approves a ₹25,000 transfer from Varun's browser session to his own UPI ID.",
-      'Varun returns to his desk and notices the missing money alert.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Pranav — Used Varun's unlocked browser session to add his own UPI ID as a vendor and transfer ₹25,000.",
-      'CCTV places Pranav alone at Varun’s chair from 10:03 AM to 10:06 AM, spanning both beneficiary creation and transfer.',
+      'Culprit: Tarun — Dropped his assigned VIP Pass (#409) outside the backstage door while lying in the WhatsApp group about being at the back gate.',
+      'The torn paper pass image clearly reads VIP BACKSTAGE PASS - #409, issued exclusively to Tarun in the register.',
     ],
   },
   'case-09': {
     maxHints: 2,
-    correctTimeline: [
-      'Club President Tara leaves her phone on the auditorium stage during rehearsal.',
-      "06:15 PM: Sahil opens the OTP SMS on Tara's phone and logs into the club Instagram on his iPhone.",
-      'Sahil removes Tara’s email from the account and posts a fake event cancellation notice.',
-      'Students start panicking and messaging the club group about the cancelled fest.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Sahil — Read the SMS OTP from Tara's unattended phone lockscreen, logged in on his iPhone, and changed the recovery email.",
-      'Backstage CCTV shows Sahil reading Tara’s lockscreen notification at 18:14 PM—one minute before login from "Sahil\'s iPhone 14".',
+      'Culprit: Nithin — Dropped his 16:30 PM library slip beneath the Hall B clue board right when the 4:45 PM college bell rang.',
+      'The background audio in the 04:45 PM voice note plays the campus bell chime (disproving the railway station claim) and matches Nithin checking out Engineering Maths-I.',
     ],
   },
   'case-10': {
     maxHints: 2,
-    correctTimeline: [
-      'Teammate Omkar shares his screen on Discord with his AWS secret keys visible in VS Code.',
-      '10:30 PM: Rival student Vivek logs into the AWS account from his hostel room using those leaked keys.',
-      "Vivek permanently deletes the project's cloud storage bucket (final-year-ml-data).",
-      'The project team tries to run their demo and gets a "Bucket Not Found" error.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Vivek — Copied Omkar's AWS keys from the Discord stream and deleted the S3 bucket from his hostel room (10.14.8.92).",
-      'Hostel Block A DHCP records map CloudTrail SourceIP 10.14.8.92 directly to Vivek in Room 112.',
+      'Culprit: Abhishek — Hosted the fake Wi-Fi hotspot from Table #6 and left his power bank behind.',
+      'Canteen CCTV at 02:10 PM confirms Abhishek sat alone at Table #6 with two phones plugged into the exact black power bank and red USB-C cable.',
     ],
   },
   'case-11': {
     maxHints: 2,
-    correctTimeline: [
-      'Yash walks past the library turnstile with a hidden RFID scanner inside his backpack.',
-      "02:01 PM: Yash's scanner copies the card ID number of Senior Student Arjun.",
-      'Yash walks into the library using the cloned card ID while Arjun is at the sports ground.',
-      "Three rare GATE exam books are checked out under Arjun's library account.",
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Yash — Skimmed Arjun's RFID card UID at 14:01 PM using his RC522 module and cloned it onto a blank card to check out books.",
-      'Sports ground CCTV proves Arjun was playing football at 18:30 PM when the cloned card scanned at the library.',
+      'Culprit: Arjun — Snapped and leaked the ticket photo while sitting at Bean & Brew Cafe at 03:50 PM.',
+      "The purple table mat and green straw in the leaked photo background match Bean & Brew Cafe from Arjun's 03:50 PM Instagram story.",
     ],
   },
   'case-12': {
     maxHints: 2,
-    correctTimeline: [
-      'The placement coordinator uploads the shortlist CSV file to a shared Google Drive folder.',
-      "12:20 PM: Someone opens the file and types Abhishek's USN into Row 14 using a Linux computer.",
-      'The updated shortlist is downloaded by the HR team for afternoon interviews.',
-      'The coordinator notices an extra student sitting in the interview waiting room.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Abhishek — Exploited the open edit permissions on the Drive link from his Ubuntu session in Lab-01 to insert his own USN.',
-      'The OS fingerprint (Ubuntu Linux x86_64) in Google Drive revisions matches only Abhishek’s active Lab-01 login at 12:20 PM.',
+      'Culprit: Manoj — Created and shared the misspelled phishing link in the 1st-year WhatsApp group.',
+      'Manoj was the only suspect connected to Canteen Wi-Fi at 02:28 PM when the fake bec-placemnts.in domain went live before sharing it at 02:30 PM.',
     ],
   },
   'case-13': {
     maxHints: 2,
-    correctTimeline: [
-      'Student Secretary Naveen submits the official room booking request from his hostel room.',
-      '09:32 AM: A fake email pretending to be from the Dean is sent using an online email-spoofing tool.',
-      'The security guard receives the fake email approving the auditorium for the esports club.',
-      'The esports club sets up their gaming PCs inside the main auditorium.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Naveen — Used an online email-spoofing tool from his IP (10.12.4.77) to forge the Dean's approval and trick the security guard.",
-      'Firewall DNS logs show 10.12.4.77 querying emkei-spoof.cz at 09:31 AM right after Naveen submitted his booking request.',
+      'Culprit: Tarun — Guessed sequential coupon numbers (#105–#108) on his Nothing Phone (2) to claim free burgers.',
+      'App logs show coupons #105–#108 redeemed back-to-back at 12:40 PM from a Nothing Phone (2), matching Tarun on CCTV five minutes later.',
     ],
   },
   'case-14': {
     maxHints: 2,
-    correctTimeline: [
-      'Hostel maintenance turns off the corridor lights, leaving the smart meter box unattended.',
-      "01:30 AM: Gaurav connects his phone to the meter's default Wi-Fi hotspot (ESP8266_Config).",
-      'Gaurav resets the power unit counter of Room 304 back to zero.',
-      'The hostel warden sees a zero electricity bill for Room 304 despite heavy AC usage.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      "Culprit: Gaurav — Connected to the smart meter's unprotected ESP8266_Config Wi-Fi from his phone and reset Room 304's usage counter.",
-      'MAC A2:44:90:11:7C:02 in the meter serial log belongs to Gaurav’s OnePlus 11, matching corridor CCTV at 01:29 AM.',
+      "Culprit: Lokesh — Took Neha's certificate PDF from the class group and typed his own name over hers.",
+      'File history shows Winner_Cert_Lokesh.pdf was edited in iLovePDF Text Editor at 04:30 PM while the QR code still verifies Neha Kulkarni (#8821).',
     ],
   },
   'case-15': {
     maxHints: 2,
-    correctTimeline: [
-      '04:00 PM: Developer Swati accidentally uploads her OpenAI API key in a public GitHub commit.',
-      "Automated bots scan public GitHub repositories and find Swati's exposed key.",
-      "Hundreds of API calls are made from an overseas server using Swati's account.",
-      'Swati receives an email alert that her $50 API credit balance has hit zero.',
-    ],
+    correctTimeline: [],
     debriefNotes: [
-      'Culprit: Swati (Accidental Leak) — Hardcoded and pushed the live OpenAI key into a public repository, allowing automated scrapers to drain the credits.',
-      'Teammates Sagar and Nidhi never pushed to GitHub; automated bots scraped chatbot.py immediately after Swati’s 16:00 commit.',
+      'Culprit: Prashanth — Dropped his morning Indi-to-Bagalkote bus ticket right in front of the merchandise stall.',
+      'The 07:30 AM Indi–Bagalkote KSRTC bus ticket and the blue backpack on Stall CCTV (03:10 PM) match Prashanth.',
     ],
   },
+
+  // =========================================================================
+  // LEVEL 3: HARD CASES (16 - 30 • WITH 4-STEP TIMELINE BUILDER)
+  // =========================================================================
   'case-16': {
     maxHints: 2,
     correctTimeline: [
-      'Faculty member Dr. Hegde connects his laptop to the smart projector over Wi-Fi.',
-      '11:05 AM: Shreyas connects to the open projector screen-share using the default PIN 0000.',
-      'A loud Rickroll video suddenly plays on the classroom projector screen.',
-      'Dr. Hegde unplugs the projector power cable and checks the connected device list.',
+      'Suresh writes the admin password on a yellow sticky note and sticks it onto the monitor.',
+      'Kiran plugs a glowing blue USB drive into his black laptop and steps away for coffee.',
+      '11:14 PM: CCTV captures the open laptop, sticky note password, and red IEEE lanyard on the desk.',
+      'Someone uses the sticky note password on the open terminal to wipe the server backup logs.',
     ],
     debriefNotes: [
-      'Culprit: Shreyas — Manually paired his ASUS ROG Strix laptop to the projector using the default PIN 0000 to play the prank video.',
-      'Miracast requires manual PIN entry (0000) and logged the exact device hostname Shreyas-ROG-Strix.',
+      'Culprit: Kiran — His red IEEE lanyard, black laptop, and blue USB drive appear on CAM-04 right before the log wipe.',
+      'Although Suresh wrote the sticky note earlier, Kiran stayed past 11:10 PM as confirmed by the 23:14:08 CCTV snapshot.',
     ],
   },
   'case-17': {
     maxHints: 2,
     correctTimeline: [
-      'The fest food stall app generates simple numbered QR codes like COUPON_101 and COUPON_102.',
-      '12:40 PM: Tarun notices the pattern and types COUPON_105 manually into the URL bar on his phone.',
-      'Tarun claims four free burgers at the food counter using unissued coupon numbers.',
-      'Real ticket holders complain that their food coupons show "Already Redeemed."',
+      'All four participants take their assigned seats in Lab-04 before the quiz begins.',
+      '03:42 PM: The Wi-Fi system detects a traffic overload crashing the quiz portal.',
+      "Router logs confirm the culprit's laptop is inside Router A and Router B's circles, but outside Router C.",
+      'Checking the floor plan pinpoints Seat 3 as the exact location of the culprit.',
     ],
     debriefNotes: [
-      "Culprit: Tarun — Exploited sequential IDOR coupon URLs from his phone (10.18.3.44) to redeem other students' meal vouchers.",
-      'Web access logs show 10.18.3.44 enumerating COUPON_105–107 five minutes before Tarun scanned 4 QR codes on Counter 1 CCTV.',
+      "Culprit: Vikram — Seat 3 is the only desk inside both Router A and B's circles while remaining outside Router C's range.",
+      'Router logs at 03:42 PM show CONNECTED to Router A & B and NO SIGNAL on Router C, eliminating Seats 1, 2, and 4.',
     ],
   },
   'case-18': {
     maxHints: 2,
     correctTimeline: [
-      '03:10 PM: Bhargav plugs a USB rubber ducky drive into PC-01 during the lab break.',
-      'A script copies a fake lock-screen program across all 20 PCs over the shared lab folder.',
-      'Every computer monitor in the lab turns red with a fake "Files Encrypted" message.',
-      'The lab instructor restarts the PCs and finds the batch file in the startup folder.',
+      'Ananya rushes onto the auditorium stage, accidentally leaving her MacBook unlocked backstage.',
+      "05:29 PM: Tushar walks up to the backstage table and types on Ananya's MacBook for 10 seconds.",
+      "The scoreboard wipe executes from Ananya's silver MacBook under her admin account.",
+      'Ananya finishes her stage announcement and discovers the scoreboard has been deleted.',
     ],
     debriefNotes: [
-      'Culprit: Bhargav — Used an Arduino BadUSB device on PC-01 during break to deploy a fake ransomware batch script across the shared lab folder.',
-      'USB event logs recorded an Arduino Leonardo HID keyboard (VID_1B4F) at 15:10:04 PM while CCTV caught Bhargav plugging a circuit board into PC-01.',
+      "Culprit: Tushar — Used Ananya's unlocked MacBook backstage while she was speaking live on stage, framing her account.",
+      'The stage livestream confirms Ananya held the microphone from 17:20 to 17:40, while backstage CCTV shows Tushar typing on her MacBook at 17:29 PM.',
     ],
   },
   'case-19': {
     maxHints: 2,
     correctTimeline: [
-      'The cultural team pairs their phone with the main stage Bluetooth speaker for soundcheck.',
-      '05:25 PM: While the stage phone disconnects briefly, Chirag pairs his Samsung phone to the speaker.',
-      'Loud siren sounds blast across the auditorium right as the chief guest starts speaking.',
-      'The sound engineer checks the speaker and sees Chirag_S23 in the paired list.',
+      "Darshan's smartwatch strap snaps near the registration desk, and he asks about it on WhatsApp.",
+      "Nikhil picks up Darshan's lost watch from the registration desk floor.",
+      "04:38 PM: Nikhil walks into the coordinator's room while Meghana is away and wipes the scoreboard.",
+      "Nikhil drops Darshan's watch under the desk to frame him while rushing out.",
     ],
     debriefNotes: [
-      'Culprit: Chirag — Manually paired his Samsung Galaxy S23 to the open stage speaker at 17:25 PM and streamed the siren sound during the speech.',
-      'A new device cannot "auto-connect" without first completing manual pairing at 17:25:10 as logged by JBL PartyBox.',
+      "Culprit: Nikhil — Picked up Darshan's lost watch and dropped it at the crime scene to frame him.",
+      "Darshan reported his broken watch at 04:15 PM on WhatsApp, and CCTV shows Nikhil picking it up at 04:20 PM before walking into the coordinator's room at 04:38 PM.",
     ],
   },
   'case-20': {
     maxHints: 2,
     correctTimeline: [
-      'The IT admin saves a plain-text file vouchers.txt inside an open shared network folder.',
-      '11:20 AM: Mohit browses the campus local network and downloads vouchers.txt to his laptop.',
-      'Mohit sells 15 high-speed internet voucher codes to his hostel friends for ₹50 each.',
-      'Guest speakers arrive at the seminar hall and find all their Wi-Fi codes already used.',
+      'Kavya locks the 20 VIP burger coupons inside Room 304.',
+      '12:50 PM: Siddharth signs out the spare key for Room 304 from the register.',
+      'Siddharth walks out of Room 304 carrying his blue backpack with the missing coupons.',
+      'Volunteers find the dropped emoji cipher slip outside the locker room.',
     ],
     debriefNotes: [
-      'Culprit: Mohit — Downloaded the plaintext vip_vouchers.txt file from the open SMB network share (172.16.4.88) and sold the codes on WhatsApp.',
-      'DHCP maps 172.16.4.88 to Mohit’s Dell laptop, and Mohan verified the purchased ₹50 code connected directly to BEC-VIP-5G.',
+      'Culprit: Siddharth — Signed out the Room 304 key and hid the coupons inside his blue backpack.',
+      'The emoji cipher decodes to Key + Room 304 -> Burger Coupons -> Blue Backpack, matching the 12:50 PM key register and 01:05 PM corridor CCTV.',
     ],
   },
   'case-21': {
     maxHints: 2,
     correctTimeline: [
-      'Event winners receive official digital certificates with a verification QR link.',
-      '04:30 PM: Lokesh edits his name onto a winner certificate PDF using an online PDF editor.',
-      'Lokesh uploads the fake certificate to LinkedIn, leaving the original QR link intact.',
-      "A recruiter scans the QR code and sees that it belongs to another student's name.",
+      'Sneha takes the 5:00–6:00 PM shift to store decoration ribbons.',
+      'Aarav takes the 6:00–7:00 PM shift and leaves the trophy untouched on the shelf.',
+      '07:30 PM: Meera is alone inside the storage room during the 7:00–8:00 PM shift when the trophy vanishes.',
+      'Varun enters at 8:00 PM and reports the trophy missing.',
     ],
     debriefNotes: [
-      "Culprit: Lokesh M. — Took Neha's shared winner PDF, overwrote her name with his own using an online PDF editor, and forgot the QR code still verified Neha.",
-      'PDF metadata shows modification at 16:30 PM in "iLovePDF Text Editor", whereas official certificates only come from Canva.',
+      'Culprit: Meera — Alibi elimination proves Meera was the only person inside the storage room during the 7:00–8:00 PM slot.',
+      'Since Sneha took 5–6 PM, Varun took 8–9 PM, and Meera entered right after Aarav (6–7 PM), only Meera was present at 07:30 PM.',
     ],
   },
   'case-22': {
     maxHints: 2,
     correctTimeline: [
-      'A junior developer builds an admin delete link using a simple URL (?delete_id=5).',
-      'Akash opens the page source, spots the hidden admin URL, and tests it in his browser.',
-      '02:27 PM: Akash runs a loop script that visits delete_id=1 through 50, wiping all team registrations.',
-      'The registration page suddenly displays "0 Teams Registered."',
+      'Priya, Kavya, and Deepak travel out of town for the weekend.',
+      '03:00 PM: The final tie-breaker question paper is leaked online.',
+      'Rohan generates a fake AI wedding selfie to pretend he was out of town.',
+      'Inspecting the selfie reveals garbled banner text and six fingers, exposing the fake alibi.',
     ],
     debriefNotes: [
-      'Culprit: Akash — Found the unauthenticated delete endpoint in the HTML source comments and ran a Python loop from IP 10.9.3.14 to wipe all 50 records.',
-      'Apache logs confirm python-urllib/3.11 iterated delete_id=1..50 from Akash’s assigned hostel IP 10.9.3.14.',
+      'Culprit: Rohan — Generated an AI fake wedding selfie to cover up leaking the tie-breaker paper.',
+      'Only Rohan’s selfie shows AI artifacts (a 6-fingered hand and garbled banner text), while Priya, Kavya, and Deepak have verified travel timestamps.',
     ],
   },
   'case-23': {
     maxHints: 2,
     correctTimeline: [
-      'Club Coordinator Anusha posts a 2-minute speech reel on her public Instagram page.',
-      '08:15 PM: An attacker clones Anusha’s voice using an AI tool and calls the event vendor.',
-      'The fake voice instructs the vendor to deliver the sound equipment to the wrong gate.',
-      'The real Anusha calls the vendor asking why the speakers haven’t arrived at the main hall.',
+      "Riya shares the lighting vendor's official QR code with the finance team.",
+      'Manish completes the ₹2,500 banner payment to PrintHub Posters.',
+      '02:14 PM: ₹18,000 is transferred from the fest account to Karan_Personal_UPI.',
+      'Karan crops and edits the UTR number on a fake receipt screenshot to hide his UPI ID.',
     ],
     debriefNotes: [
-      "Culprit: Prateek — Downloaded Anusha's public Instagram reel, cloned her voice using his AI account, and spoofed a VoIP call to mislead the vendor.",
-      'SaaS logs prove prateek.ai@gmail.com uploaded anusha_insta_reel.mp3 at 20:08 PM—seven minutes before the VoIP call while Anusha was speaking with the Principal.',
+      'Culprit: Karan — Transferred ₹18,000 to his personal UPI ID and fabricated a receipt with a shortened 9-digit UTR.',
+      'Genuine Indian UPI UTRs are 12 digits (632284910447); the fest bank statement shows the 02:14 PM debit actually went to Karan_Personal_UPI.',
     ],
   },
   'case-24': {
     maxHints: 2,
     correctTimeline: [
-      '08:45 AM: Before the workshop starts, Suraj plugs a tiny black USB adapter behind the podium PC.',
-      'The guest speaker types his cloud portal password on the podium keyboard.',
-      'During lunch break, Suraj returns to the stage and unplugs the hardware keylogger.',
-      "Unauthorized logins from Suraj's hostel IP appear on the guest speaker's account.",
+      'Class Rep Rahul collects the attendance sheets and hands them to Prof. Sharma.',
+      "04:05 PM: Someone tries to log into Prof. Sharma's portal account twice with the wrong password.",
+      'The attacker resets the password using the pet name "Bruno" from a browser with CR bookmarks.',
+      "Aditya's attendance is manually updated from 42% to 85% in the portal.",
     ],
     debriefNotes: [
-      'Culprit: Suraj — Planted a hardware USB keylogger on the podium keyboard before the workshop, retrieved it at lunch, and logged in from his hostel IP.',
-      'Physical pass-through keyloggers operate completely outside Windows OS, explaining why wiping the hard drive found no malware.',
+      "Culprit: Rahul — Used Prof. Sharma's public Instagram post to reset the password and edit Aditya's attendance.",
+      'Browser bookmarks BEC_CR_Notices and Class_Attendance_Sheet tie the 04:07 PM password reset directly to the Class Representative laptop.',
     ],
   },
   'case-25': {
     maxHints: 2,
     correctTimeline: [
-      'The canteen wallet app stores user balance locally inside browser localStorage.',
-      '01:10 PM: Pradeep opens Chrome Developer Tools on his phone and edits his balance from ₹20 to ₹2000.',
-      'Pradeep orders snacks for his entire group using the edited wallet screen.',
-      'Daily accounting shows ₹1,980 worth of food issued without any actual UPI payment.',
+      'Student Secretary Naveen submits the official auditorium booking request.',
+      '09:32 AM: A fake email pretending to be from the Dean is sent using an online fake-email website.',
+      "The security guard reads the fake email on Naveen's phone and unlocks the auditorium.",
+      'The esports group sets up their gaming laptops inside the main auditorium.',
     ],
     debriefNotes: [
-      'Culprit: Pradeep — Modified user_wallet_bal in browser localStorage from ₹20 to ₹2,000 to order free food for his group.',
-      'Because wallet.js trusted client-side localStorage at checkout, editing the balance bypassed server-side UPI verification.',
+      'Culprit: Naveen — Sent himself a fake approval email from free-fake-mail.cz to trick the security guard.',
+      "Wi-Fi logs show Naveen's phone visited free-fake-mail.cz at 09:31 AM, one minute before the spoofed email arrived.",
     ],
   },
   'case-26': {
     maxHints: 2,
     correctTimeline: [
-      "The robotics team uploads their autonomous flight code to the drone's microSD card.",
-      '03:20 PM: While the team goes for testing clearance, Ritesh swaps the altitude value from 5m to 0m.',
-      'During the live demo, the drone refuses to lift off and spins on the ground.',
-      'Checking the SD card file properties shows it was modified during the testing break.',
+      '08:45 AM: Before the workshop starts, Suraj plugs a tiny black USB keylogger behind the podium PC.',
+      'The guest speaker types his cloud portal password on the podium keyboard.',
+      'During lunch break, Suraj returns to the stage and unplugs the USB adapter.',
+      "Unauthorized logins from Suraj's hostel room appear on the guest speaker's account.",
     ],
     debriefNotes: [
-      "Culprit: Ritesh — Edited TARGET_ALT to 0.0 on Team Skyhawk's microSD card at 15:20 PM while they were at the judge inspection desk.",
-      'The file modification timestamp (15:20:44 PM) matches pit area CCTV showing Ritesh at Skyhawk’s workbench with a USB microSD card reader.',
+      'Culprit: Suraj — Attached a physical USB keylogger to the podium keyboard before the talk and retrieved the password at lunch.',
+      'Because a hardware keylogger sits inline on the cable, resetting the PC software afterward did not erase the captured credentials.',
     ],
   },
   'case-27': {
     maxHints: 2,
     correctTimeline: [
-      '10:15 AM: Nikhil sets up a fake hotspot named BEC_Campus_Free_5G near the main canteen.',
-      'Twelve students connect to the fake Wi-Fi and type their college roll number and password.',
-      'Nikhil captures the saved passwords in a text file on his laptop.',
-      'Students notice they have no internet access even after logging into the fake portal.',
+      "The robotics team saves their 5-meter flight plan onto the drone's memory card.",
+      '03:20 PM: While the team goes for safety clearance, Ritesh edits the target height from 5m to 0m.',
+      'During the live demo, the drone refuses to lift off and spins on the ground.',
+      'Checking the memory card file properties shows it was edited during the 3:20 PM break.',
     ],
     debriefNotes: [
-      'Culprit: Nikhil — Hosted a rogue Evil Twin hotspot (BEC_Campus_Free_5G) from his laptop to harvest student ERP passwords.',
-      'Campus network registry maps the rogue BSSID (B4:2E:99:10:44:88) directly to Nikhil’s Lenovo Legion laptop seen with an Alfa USB Wi-Fi antenna on CCTV.',
+      "Culprit: Ritesh — Edited Team Skyhawk's memory card at 03:20 PM while they were away at the judge inspection desk.",
+      'File timestamps confirm flight_plan.txt was modified at 03:20 PM when CCTV shows Ritesh with a memory card reader at Skyhawk’s desk.',
     ],
   },
   'case-28': {
     maxHints: 2,
     correctTimeline: [
-      'The digital notice board in the lobby runs on a Raspberry Pi with default SSH credentials.',
-      '04:25 PM: Darshan scans the local Wi-Fi, logs into the Raspberry Pi, and replaces the notice image.',
+      'The digital notice board in the lobby is set up with its default factory password.',
+      '04:25 PM: Darshan connects to the lobby display from his HP laptop and uploads holiday.png.',
       'The lobby screen suddenly displays "Tomorrow is a Holiday" in giant red letters.',
-      'The HOD walks past the lobby screen and calls the IT department immediately.',
+      'The HOD walks past the lobby screen and calls the organizers immediately.',
     ],
     debriefNotes: [
-      'Culprit: Darshan — Logged into the lobby Raspberry Pi using default pi/raspberry SSH credentials from 192.168.12.71 and copied over the fake holiday banner.',
-      'Bash history on the Pi records scp darshan@192.168.12.71:~/holiday.png directly from Darshan’s assigned IP.',
+      'Culprit: Darshan — Logged into the lobby screen with its default password from his HP laptop and uploaded the fake holiday banner.',
+      'The screen log records Darshan-HP-Laptop using default password "raspberry" at 04:25 PM while CCTV shows Darshan on the lobby sofa with his HP laptop.',
     ],
   },
   'case-29': {
@@ -418,97 +354,63 @@ const caseAnswerKeys: Record<
       'The hackathon judges save their final Excel score sheet on the seminar hall desktop.',
       '05:25 PM: Tejas plugs his USB drive into the desktop PC while pretending to adjust the HDMI cable.',
       "Tejas shares photos of the judges' secret scores in his team's private WhatsApp group.",
-      'Windows USB history confirms a SanDisk drive was connected during the break.',
+      'Windows USB history confirms TEJAS_USB was connected during the coffee break.',
     ],
     debriefNotes: [
-      'Culprit: Tejas — Plugged his TEJAS_USB pendrive into the unattended seminar PC at 17:25 PM while feigning an HDMI check and copied Final_Scores.xlsx.',
-      'Windows USBSTOR registry logs and file access logs confirm TEJAS_USB mounted at 17:25:18 and copied Final_Scores.xlsx 22 seconds later.',
+      'Culprit: Tejas — Plugged his TEJAS_USB drive into the unattended PC while feigning an HDMI check and copied the scores.',
+      'Windows USB history records volume TEJAS_USB copying Final_Scores.xlsx at 05:25 PM, matching Seminar Hall CCTV.',
     ],
   },
   'case-30': {
     maxHints: 2,
     correctTimeline: [
-      'Two minutes before concert tickets go live, Chetan runs a Python auto-clicker script.',
-      '07:00 PM: The ticket booking website opens, and Chetan’s script submits 30 bookings in 3 seconds.',
+      'Two minutes before concert tickets go live, Chetan starts an auto-clicker script on his laptop.',
+      "07:00 PM: The ticket booking page opens, and Chetan's script grabs all 30 passes in 3 seconds.",
       'Regular students see "Sold Out" within sixty seconds of the launch.',
-      'Server logs show 30 bookings came from the exact same browser session ID.',
+      'Website logs confirm all 30 bookings came from usr_chetan_881.',
     ],
     debriefNotes: [
-      'Culprit: Chetan — Used a Python Selenium automation script from his laptop (10.5.19.33) to book all 30 VIP passes in 3 seconds.',
-      'Web logs reveal 30 POST /book_vip calls in 3 seconds carrying session_id=usr_chetan_881 and User-Agent Python-Selenium/4.18 from Chetan’s hostel IP.',
+      'Culprit: Chetan — Used an auto-clicker script from his hostel laptop to grab all 30 VIP passes in 3 seconds.',
+      'All 30 bookings executed between 07:00:00 and 07:00:03 under account usr_chetan_881 traced to Chetan’s laptop in Hostel Block C.',
     ],
   },
 };
 
-const summaryCriteria: Record<string, { culprit: string[]; clues: string[] }> = {
-  'case-01': { culprit: ['rohan'], clues: ['192.168.14.88', '192.168.14', 'canteen', 'wi-fi', 'wifi', 'windows', 'windows nt 10.0', 'dhcp', 'macbook', 'os_midsem', 'chrome', 'router'] },
-  'case-02': { culprit: ['vikram'], clues: ['vikram_codes', 'pat', 'token', '.env', 'charger', '65w', 'usb-c', 'force', 'clone', '03:12', '03:17', 'backend_deploy'] },
-  'case-03': { culprit: ['rahul'], clues: ['bruno', 'instagram', 'osint', 'security question', 'reset', 'cr', 'bec_cr_notices', 'attendance_upload', 'bookmark', 'aditya', '85%', 'prof_sharma'] },
-  'case-04': { culprit: ['tanmay'], clues: ['kali', 'kali-live-usb', 'usb', 'pendrive', 'deauth', '-32', 'rssi', 'dbm', 'ap-lab04', '98:e7:f4:22:10:8a', 'jam', 'desk a1'] },
-  'case-05': { culprit: ['manoj'], clues: ['manoj_k', 'dev_manoj99', '103.21.58.190', 'canteen', 'wi-fi', 'wifi', 'whois', 'bec-placemnts', 'typosquat', 'phish', 'x-originating-ip', 'whatsapp'] },
-  'case-06': { culprit: ['nithin'], clues: ['dev_nithin', '172.16.5.44', 'ssh', 'xmrig', 'xmrig_miner', 'cron', 'hostel', 'hostel-block-b', '/tmp/.hidden', 'crypto', '20:45', '20:47'] },
-  'case-07': { culprit: ['kiran'], clues: ['kiran_07', 'postman', 'postmanruntime', '10.20.4.18', 'library', 'dhcp', 'devtools', 'post', '/api/v1/submit', '100', '4 seconds'] },
-  'case-08': { culprit: ['pranav'], clues: ['pranav.99@okicici', 'pranav.99', 'upi', 'techsupplies_blr', 'varun_chrome', 'unlocked', 'cctv', '10:04', '10:05', '192.168.1.50', '25,000', '25000'] },
-  'case-09': { culprit: ['sahil'], clues: ["sahil's iphone 14", 'iphone 14', 'sahil.dark@gmail.com', 'otp', 'sms', 'lockscreen', 'backstage', 'cctv', '18:14', '18:15', 'recovery email'] },
-  'case-10': { culprit: ['vivek'], clues: ['10.14.8.92', 'room 112', 'cloudtrail', 'deletebucket', 'final-year-ml-data', 'aws_secret_access_key', 'discord', 'akiaiosfodnn7example', 'iam', 's3', '22:32'] },
-  'case-11': { culprit: ['yash'], clues: ['rfid', 'rc522', '8f-22-19-b4', 'cloned', 'clone', 'skim', '14:01', 'football', 'gate', 'backpack', 'blank', 'cctv'] },
-  'case-12': { culprit: ['abhishek'], clues: ['ubuntu', 'linux', 'x86_64', 'lab-01', '2ba22cs009', 'row 14', 'placement_guest_link', 'google drive', 'revision', '12:20', 'dual-boot'] },
-  'case-13': { culprit: ['naveen'], clues: ['10.12.4.77', 'emkei-spoof.cz', 'emkei', 'spf', 'fail', 'return-path', 'dean@bec.edu', 'dns', '09:30', '09:31', '09:32', 'spoof'] },
-  'case-14': { culprit: ['gaurav'], clues: ['a2:44:90:11:7c:02', 'esp8266', 'esp8266_config', 'admin/admin', 'reset_kwh', 'room 304', 'oneplus 11', '01:29', '01:30', '0.0 kwh', 'mac'] },
-  'case-15': { culprit: ['swati'], clues: ['swati-ml', 'chatbot.py', 'sk-proj-9981xyz', 'openai', 'github', 'hardcoded', 'public', '185.220.101.4', 'bot', '16:00', '4,200'] },
-  'case-16': { culprit: ['shreyas'], clues: ['shreyas-rog-strix', 'rog strix', '0000', 'miracast', '6c:2b:59:11:8e:04', 'pin', 'epson', 'back row', '11:05', 'hostname'] },
-  'case-17': { culprit: ['tarun'], clues: ['10.18.3.44', 'coupon_105', 'coupon_106', 'coupon_107', 'idor', 'sequential', 'nothing phone', '12:40', '12:45', 'qr', 'burger'] },
-  'case-18': { culprit: ['bhargav'], clues: ['badusb', 'rubber ducky', 'arduino', 'leonardo', 'vid_1b4f', 'prank_lock.bat', 'pc-01', '15:10', '15:11', 'startup', 'cctv'] },
-  'case-19': { culprit: ['chirag'], clues: ['chirag_s23', '48:2c:a0:99:12:ef', 'bluetooth', 'jbl', 'partybox', '17:25', '17:30', 's23', 'row 3', 'paired'] },
-  'case-20': { culprit: ['mohit'], clues: ['172.16.4.88', 'vip_vouchers.txt', 'vouchers', 'smb', 'it-share', 'bec-vip-5g', '11:20', 'whatsapp', 'mohan', 'dell'] },
-  'case-21': { culprit: ['lokesh'], clues: ['ilovepdf', 'cert_8821', 'qr', 'metadata', 'canva', 'neha', '16:30', 'linkedin', 'winner_cert_lokesh.pdf'] },
-  'case-22': { culprit: ['akash'], clues: ['10.9.3.14', 'python-urllib', 'urllib', 'remove_team.php', 'delete_id', 'html comment', 'index.html', 'ctrl+u', '14:27', '50'] },
-  'case-23': { culprit: ['prateek'], clues: ['prateek.ai@gmail.com', 'anusha_insta_reel.mp3', 'voip', 'deepfake', 'voice cloning', '10.12.4.77', '20:08', '20:15', 'principal', 'instagram'] },
-  'case-24': { culprit: ['suraj'], clues: ['keylogger', 'hardware', '172.16.9.21', 'usb', 'pass-through', 'adapter', '08:45', '13:02', '14:15', 'podium', 'cctv'] },
-  'case-25': { culprit: ['pradeep'], clues: ['localstorage', 'user_wallet_bal', 'wallet.js', '20.00', '2000', '2,000', '1,980', 'devtools', '2ba22ec044', 'upi'] },
-  'case-26': { culprit: ['ritesh'], clues: ['mission.py', 'target_alt', '0.0', 'microsd', 'card reader', '15:20:44', '15:20', 'cctv', 'skyhawk', 'last modified'] },
-  'case-27': { culprit: ['nikhil'], clues: ['bec_campus_free_5g', 'b4:2e:99:10:44:88', 'evil twin', 'rogue', 'bssid', 'alfa', 'antenna', 'channel 6', 'captive portal', 'lenovo legion', '10:15'] },
-  'case-28': { culprit: ['darshan'], clues: ['192.168.12.71', 'pi/raspberry', 'raspberry', 'scp', 'holiday.png', 'banner.png', 'bash', 'ssh', '16:25', 'hp pavilion'] },
-  'case-29': { culprit: ['tejas'], clues: ['tejas_usb', 'usbstor', 'sandisk', 'final_scores.xlsx', '17:25:18', '17:25:40', '17:25', 'hdmi', 'cctv', 'registry'] },
-  'case-30': { culprit: ['chetan'], clues: ['usr_chetan_881', 'session_id', 'python-selenium', 'selenium', '10.5.19.33', 'book_vip', '30', '3 seconds', 'cookie', '19:00'] },
+const summaryCriteria: Record<
+  string,
+  { culprit: string[]; others: string[]; clues: string[] }
+> = {
+  'case-01': { culprit: ['kiran'], others: ['pranav', 'sneha', 'arjun'], clues: ['red', 'lanyard', 'ieee', 'coffee', 'stain', 'registration', 'desk'] },
+  'case-02': { culprit: ['chirag'], others: ['meera', 'varun', 'divya'], clues: ['chirag_s23', 'samsung', 's23', 'bluetooth', 'silicone', 'case', 'curtain', '10:42'] },
+  'case-03': { culprit: ['rohan'], others: ['ananya', 'siddharth', 'pooja'], clues: ['paneer', 'puff', 'mango', 'juice', 'canteen', 'receipt', '01:20', '1:20', 'judges'] },
+  'case-04': { culprit: ['manoj'], others: ['kavya', 'deepak', 'neha'], clues: ['manoj_sem1_notes', 'sandisk', 'blue', 'usb', 'pendrive', 'cartoon', 'lobby', '32gb'] },
+  'case-05': { culprit: ['tarun'], others: ['riya', 'harsha', 'nikhil'], clues: ['yellow', 'sticky', 'note', 'green', 'drawing sheets', 'decoration', 'router', 'ink'] },
+  'case-06': { culprit: ['rohan'], others: ['priya', 'siddharth', 'neha'], clues: ['85%', '9%', 'battery', 'doctored', 'reused', 'screenshot', '1,200', '1200', '02:15', '2:15', 'cctv', 'ritesh'] },
+  'case-07': { culprit: ['ananya'], others: ['vikram', 'kavya', 'deepak'], clues: ['reflection', 'yellow', 'mug', 'blue', 'notebook', 'spiral', 'hostel', 'desk', 'instagram', '04:00'] },
+  'case-08': { culprit: ['tarun'], others: ['harsha', 'meghana', 'divya'], clues: ['409', '#409', 'vip', 'pass', 'backstage', 'torn', 'whatsapp', 'register', 'back gate'] },
+  'case-09': { culprit: ['nithin'], others: ['swati', 'harsha', 'kavya'], clues: ['library', 'slip', '16:30', '4:45', 'bell', 'chime', 'mathematics', 'maths', 'voice note', 'railway'] },
+  'case-10': { culprit: ['abhishek'], others: ['priya', 'tejas', 'divya'], clues: ['power bank', '20,000mah', '20000', 'red', 'cable', 'table #6', 'table 6', 'bec_free_5g', 'cctv', 'two phones'] },
+  'case-11': { culprit: ['arjun'], others: ['meghana', 'sana', 'varun'], clues: ['purple', 'mat', 'green', 'straw', 'bean & brew', 'bean', 'cafe', 'coffee', '03:50', 'instagram'] },
+  'case-12': { culprit: ['manoj'], others: ['kavya', 'rakesh', 'deepak'], clues: ['bec-placemnts', 'misspelled', 'phishing', 'whatsapp', 'canteen', 'wi-fi', 'wifi', '.edu.in', '02:28', '02:30'] },
+  'case-13': { culprit: ['tarun'], others: ['kunal', 'sneha', 'vikash'], clues: ['nothing phone', 'nothing', '105', '#105', '108', 'sequential', 'coupon', 'burgers', '12:40', '12:45', 'cctv'] },
+  'case-14': { culprit: ['lokesh'], others: ['neha', 'prashanth', 'vikas'], clues: ['ilovepdf', 'qr', 'cert #8821', '8821', 'metadata', 'edited', 'whatsapp', 'pdf', '04:30'] },
+  'case-15': { culprit: ['prashanth'], others: ['sagar', 'divya', 'kiran'], clues: ['ksrtc', 'bus', 'ticket', 'indi', 'bagalkote', '07:30', '7:30', 'backpack', 'blue', 'hoodies'] },
+  'case-16': { culprit: ['kiran'], others: ['pranav', 'meera', 'suresh'], clues: ['red', 'lanyard', 'sticky', 'lab@2026', 'usb', 'blue', 'cam-04', '23:14', 'laptop', 'coffee'] },
+  'case-17': { culprit: ['vikram'], others: ['rohan', 'sneha', 'ananya'], clues: ['seat 3', 'router a', 'router b', 'router c', 'outside', 'overlap', 'circle', '03:42', 'map'] },
+  'case-18': { culprit: ['tushar'], others: ['ananya', 'vikram', 'priya'], clues: ['unlocked', 'macbook', 'backstage', 'cctv', '17:29', '5:29', 'livestream', 'stage', 'framed', 'scoreboard'] },
+  'case-19': { culprit: ['nikhil'], others: ['darshan', 'meghana', 'harsha'], clues: ['smartwatch', 'boat', 'watch', 'strap', 'planted', 'frame', '04:20', '04:38', 'cctv', 'whatsapp'] },
+  'case-20': { culprit: ['siddharth'], others: ['kavya', 'rohan', 'ananya'], clues: ['304', 'room 304', 'blue backpack', 'backpack', 'key', '12:50', '01:05', 'emoji', 'coupons', 'burger'] },
+  'case-21': { culprit: ['meera'], others: ['sneha', 'aarav', 'varun'], clues: ['7-8', '7–8', '7:00', '07:30', 'slot', 'shift', 'trophy', 'after aarav', 'storage'] },
+  'case-22': { culprit: ['rohan'], others: ['priya', 'kavya', 'deepak'], clues: ['ai', 'fake', 'selfie', 'wedding', '6-finger', 'six', 'fingers', 'gibberish', 'banner', 'garbled'] },
+  'case-23': { culprit: ['karan'], others: ['divya', 'manish', 'riya'], clues: ['utr', '9-digit', '9 digits', '12', '632284910', 'karan_personal_upi', '18,000', '18000', '02:14', 'cropped'] },
+  'case-24': { culprit: ['rahul'], others: ['aditya', 'divya', 'neha'], clues: ['bruno', 'instagram', 'pet', 'security question', 'bec_cr_notices', 'bookmark', 'class_attendance_sheet', '85%', '04:07'] },
+  'case-25': { culprit: ['naveen'], others: ['riya', 'kabir', 'omkar'], clues: ['free-fake-mail.cz', 'free-fake-mail', 'spoof', '09:31', '09:32', 'mailer', 'dean', 'auditorium', 'wi-fi'] },
+  'case-26': { culprit: ['suraj'], others: ['aryan', 'nikhita', 'tarun'], clues: ['keylogger', 'adapter', 'usb', 'keyboard', '08:45', '01:02', '02:15', 'room 204', 'podium', 'cctv'] },
+  'case-27': { culprit: ['ritesh'], others: ['tejas', 'aishwarya', 'harish'], clues: ['flight_plan', '03:20', '3:20', 'card reader', 'memory card', '0m', 'target height', 'cctv', 'edited'] },
+  'case-28': { culprit: ['darshan'], others: ['charan', 'pooja', 'dinesh'], clues: ['darshan-hp-laptop', 'hp laptop', 'raspberry', 'default', 'holiday.png', '04:25', 'sofa', 'cctv'] },
+  'case-29': { culprit: ['tejas'], others: ['rohan', 'shashank', 'keerthi'], clues: ['tejas_usb', 'sandisk', 'final_scores', 'hdmi', '05:25', '5:25', 'usb', 'podium', 'cctv'] },
+  'case-30': { culprit: ['chetan'], others: ['advait', 'meera', 'devansh'], clues: ['usr_chetan_881', 'auto-clicker', 'script', '3 seconds', '30', 'hostel block c', '07:00', 'asus'] },
 };
-
-const caseOtherSuspects: Record<string, string[]> = {
-  'case-01': ['aarav', 'sneha', 'kulkarni'],
-  'case-02': ['meera', 'karthik', 'ananya'],
-  'case-03': ['aditya', 'divya', 'neha'],
-  'case-04': ['siddharth', 'pooja', 'harsha'],
-  'case-05': ['kavya', 'rakesh', 'deepak'],
-  'case-06': ['priya', 'sameer', 'tanya'],
-  'case-07': ['arjun', 'shreya', 'varun'],
-  'case-08': ['varun', 'aditi', 'rohan'],
-  'case-09': ['tara', 'nandini', 'akash'],
-  'case-10': ['omkar', 'bhavna', 'divya'],
-  'case-11': ['arjun', 'megha', 'suresh'],
-  'case-12': ['isha', 'pranav', 'gautam'],
-  'case-13': ['riya', 'kabir', 'omkar'],
-  'case-14': ['ankita', 'devansh', 'lakshmi'],
-  'case-15': ['pallavi', 'sagar', 'nidhi'],
-  'case-16': ['hegde', 'venkatesh', 'abhishek'],
-  'case-17': ['kunal', 'sneha', 'vikash'],
-  'case-18': ['manish', 'darshan', 'spoorthi'],
-  'case-19': ['ananya', 'roshan', 'chitra'],
-  'case-20': ['sandeep', 'kavita', 'mohan'],
-  'case-21': ['neha', 'prashanth', 'vikas'],
-  'case-22': ['deepa', 'anil', 'shweta'],
-  'case-23': ['anusha', 'mahesh', 'soumya'],
-  'case-24': ['aryan', 'nikhita', 'tarun'],
-  'case-25': ['pramod', 'anusha', 'rakesh'],
-  'case-26': ['tejas', 'aishwarya', 'harish'],
-  'case-27': ['rhea', 'manoj', 'anup'],
-  'case-28': ['charan', 'pooja', 'dinesh'],
-  'case-29': ['rohan', 'shashank', 'keerthi'],
-  'case-30': ['advait', 'meera', 'devansh'],
-};
-
-const allCulpritNames = Array.from(
-  new Set(Object.values(summaryCriteria).flatMap((entry) => entry.culprit))
-);
 
 const summaryFillerWords = new Set([
   'the',
@@ -586,12 +488,21 @@ function isExtraSuspectAccused(lowerText: string, name: string): boolean {
   return false;
 }
 
-function evaluateAnswerSummary(caseId: string, report: string) {
+function getCaseMaxScoreById(caseId: string): number {
+  const num = Number(caseId.replace(/\D+/g, ''));
+  if (num >= 1 && num <= 5) return 50;
+  if (num >= 6 && num <= 15) return 75;
+  return 100;
+}
+
+function evaluateAnswerSummary(caseId: string, report: string, maxPoints = 50) {
   const trimmed = report.trim();
   const criteria = summaryCriteria[caseId];
+  const halfPoints = Math.round(maxPoints / 2);
   if (!trimmed || !criteria) {
     return {
       summaryScore: 0,
+      maxPoints,
       culpritMatched: false,
       culpritPoints: 0,
       clueHits: 0,
@@ -604,18 +515,14 @@ function evaluateAnswerSummary(caseId: string, report: string) {
   const culpritMatched = criteria.culprit.some((term) => matchesSummaryTerm(lower, term));
   const clueHits = criteria.clues.filter((term) => matchesSummaryTerm(lower, term)).length;
 
-  const caseOthers = caseOtherSuspects[caseId] || [];
-  const candidateExtraNames = Array.from(
-    new Set([...caseOthers, ...allCulpritNames])
-  ).filter((name) => !criteria.culprit.includes(name));
-
-  const extraSuspectNames = candidateExtraNames.filter((name) =>
+  const extraSuspectNames = criteria.others.filter((name) =>
     isExtraSuspectAccused(lower, name)
   );
   const extraSuspectCount = extraSuspectNames.length;
-  const multiCulpritPenalty = extraSuspectCount * 15;
+  const penaltyPerExtra = maxPoints >= 100 ? 30 : maxPoints >= 75 ? 25 : 15;
+  const multiCulpritPenalty = extraSuspectCount * penaltyPerExtra;
 
-  const nameTokensToExclude = new Set([...criteria.culprit, ...candidateExtraNames]);
+  const nameTokensToExclude = new Set([...criteria.culprit, ...criteria.others]);
   const meaningfulInfoWords = lower
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
@@ -627,26 +534,29 @@ function evaluateAnswerSummary(caseId: string, report: string) {
     );
 
   const hasInfo = clueHits >= 1 || meaningfulInfoWords.length >= 2;
-  const culpritPoints = culpritMatched ? 25 : 0;
+  const culpritPoints = culpritMatched ? halfPoints : 0;
+  const infoMax = maxPoints - halfPoints;
+  const singleWordCredit = Math.round(infoMax * 0.6);
   const cluePoints = culpritMatched
     ? hasInfo
-      ? 25
+      ? infoMax
       : meaningfulInfoWords.length === 1
-      ? 15
+      ? singleWordCredit
       : 0
     : clueHits > 0
-    ? Math.min(15, clueHits * 5)
+    ? Math.min(Math.round(maxPoints * 0.3), clueHits * Math.max(5, Math.round(maxPoints * 0.1)))
     : meaningfulInfoWords.length >= 3
-    ? 5
+    ? Math.round(maxPoints * 0.1)
     : 0;
 
   const summaryScore = Math.max(
     0,
-    Math.min(50, culpritPoints + cluePoints - multiCulpritPenalty)
+    Math.min(maxPoints, culpritPoints + cluePoints - multiCulpritPenalty)
   );
 
   return {
     summaryScore,
+    maxPoints,
     culpritMatched,
     culpritPoints,
     clueHits,
@@ -725,6 +635,14 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'createTeam') {
+      const accessCode = String(payload.accessCode || '').trim();
+      const expectedCode = Deno.env.get('REGISTRATION_ACCESS_CODE') || 'Avion_2026';
+      if (!accessCode || accessCode !== expectedCode) {
+        return json(
+          { error: 'Invalid access code. Please contact the organizer for the valid access code.' },
+          403
+        );
+      }
       const name = String(payload.name || '').trim();
       if (name.length < 2 || name.length > 30) {
         return json({ error: 'Team name must be between 2 and 30 characters.' }, 400);
@@ -893,21 +811,27 @@ Deno.serve(async (req) => {
       const timelineOrder = Array.isArray(payload.timelineOrder) ? payload.timelineOrder : [];
       const reportText = typeof payload.report === 'string' ? payload.report : '';
       const totalSteps = key.correctTimeline.length;
+      const hasTimeline = totalSteps > 0;
+      const maxScore = getCaseMaxScoreById(caseId);
+      const summaryMax = hasTimeline ? 50 : maxScore;
       let timelineMatches = 0;
       for (let i = 0; i < totalSteps; i += 1) {
         if (timelineOrder[i] === key.correctTimeline[i]) timelineMatches += 1;
       }
 
-      const perStepPoints = totalSteps > 0 ? 50 / totalSteps : 0;
-      const sequenceScore = Number((timelineMatches * perStepPoints).toFixed(2));
-      const summaryEval = evaluateAnswerSummary(caseId, reportText);
-      const rawScore = sequenceScore + summaryEval.summaryScore - hintsUsed * 5;
-      const finalScore = Math.max(0, Math.min(100, Math.round(rawScore)));
-      const perStepLabel = Number(perStepPoints.toFixed(1)).toString();
+      const perStepPoints = hasTimeline ? 50 / totalSteps : 0;
+      const sequenceScore = hasTimeline
+        ? Number((timelineMatches * perStepPoints).toFixed(2))
+        : undefined;
+      const summaryEval = evaluateAnswerSummary(caseId, reportText, summaryMax);
+      const rawScore = (sequenceScore ?? 0) + summaryEval.summaryScore - hintsUsed * 5;
+      const finalScore = Math.max(0, Math.min(maxScore, Math.round(rawScore)));
+      const perStepLabel = hasTimeline ? Number(perStepPoints.toFixed(1)).toString() : '0';
+      const halfMax = Math.round(summaryMax / 2);
 
       const summaryDetailParts = [
-        `Culprit ${summaryEval.culpritMatched ? 'identified' : 'missing'} (${summaryEval.culpritPoints}/25)`,
-        `Info & clues (${summaryEval.cluePoints}/25)`,
+        `Culprit ${summaryEval.culpritMatched ? 'identified' : 'missing'} (${summaryEval.culpritPoints}/${halfMax})`,
+        `Info & clues (${summaryEval.cluePoints}/${summaryMax - halfMax})`,
       ];
       if (summaryEval.extraSuspectCount > 0) {
         summaryDetailParts.push(
@@ -916,15 +840,19 @@ Deno.serve(async (req) => {
       }
 
       const explanations = [
+        ...(hasTimeline
+          ? [
+              {
+                title: 'Sequence recognition (50 pts)',
+                correct: timelineMatches === totalSteps,
+                explanation: `${timelineMatches} of ${totalSteps} orders matched (${sequenceScore} / 50 pts · ${perStepLabel} pts each).`,
+              },
+            ]
+          : []),
         {
-          title: 'Sequence recognition (50%)',
-          correct: timelineMatches === totalSteps,
-          explanation: `${timelineMatches} of ${totalSteps} orders matched (${sequenceScore} / 50 pts · ${perStepLabel} pts each).`,
-        },
-        {
-          title: 'Answer summary (50%)',
-          correct: summaryEval.summaryScore >= 35,
-          explanation: `${summaryEval.summaryScore} / 50 pts — ${summaryDetailParts.join(' · ')}.`,
+          title: hasTimeline ? 'Answer summary (50 pts)' : `Answer summary (${summaryMax} pts)`,
+          correct: summaryEval.summaryScore >= Math.round(summaryMax * 0.7),
+          explanation: `${summaryEval.summaryScore} / ${summaryMax} pts — ${summaryDetailParts.join(' · ')}.`,
         },
         ...key.debriefNotes.map((note, idx) => ({
           title: `Forensic finding 0${idx + 1}`,
@@ -935,6 +863,7 @@ Deno.serve(async (req) => {
 
       const caseResult = {
         score: finalScore,
+        maxScore,
         sequenceScore,
         summaryScore: summaryEval.summaryScore,
         timelineMatches,
@@ -988,9 +917,13 @@ Deno.serve(async (req) => {
         await adminClient.from('sessions').update({ completed: true }).eq('id', session.id);
       }
 
+      const message = hasTimeline
+        ? `Sequence ${sequenceScore}/50 (${timelineMatches}/${totalSteps} × ${perStepLabel} pts) + Summary ${summaryEval.summaryScore}/50.`
+        : `Answer summary ${summaryEval.summaryScore}/${summaryMax} (No timeline required for this case).`;
+
       return json({
         ...caseResult,
-        message: `Sequence ${sequenceScore}/50 (${timelineMatches}/${totalSteps} × ${perStepLabel} pts) + Summary ${summaryEval.summaryScore}/50.`,
+        message,
       });
     }
 

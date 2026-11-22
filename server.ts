@@ -19,6 +19,7 @@ interface TeamRecord {
 
 interface CaseScoreRecord {
   score: number;
+  maxScore?: number;
   sequenceScore?: number;
   summaryScore?: number;
   hintsUsed: number;
@@ -93,10 +94,23 @@ interface InvestigationSessionRecord {
   teamId: string;
   caseId: string;
   startedAt: number;
+  accumulatedElapsedSeconds?: number;
+  runningSince?: number | null;
   hintsUsed: number;
   lastWriter: string;
   progress: SessionProgress;
   completed: boolean;
+}
+
+function getSessionElapsedSeconds(session: InvestigationSessionRecord, isLiveNow: boolean): number {
+  if (typeof session.accumulatedElapsedSeconds === 'number') {
+    const activeExtra =
+      isLiveNow && typeof session.runningSince === 'number'
+        ? Math.max(0, Math.floor((Date.now() - session.runningSince) / 1000))
+        : 0;
+    return session.accumulatedElapsedSeconds + activeExtra;
+  }
+  return Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000));
 }
 
 interface ArenaDatabase {
@@ -109,6 +123,7 @@ interface ArenaDatabase {
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || 'ARENA-ADMIN-2026';
+const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion_2026';
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const DB_FILE = path.join(DATA_DIR, 'arena.json');
 
@@ -195,13 +210,27 @@ function broadcastEvent(event: string, payload: unknown): void {
   }
 }
 
-function buildPublicState(db: ArenaDatabase, isAdmin: boolean) {
+function buildPublicState(db: ArenaDatabase, isAdmin: boolean, playerId = '') {
   const sortedRankings = [...db.rankings].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     return a.elapsedSeconds - b.elapsedSeconds;
   });
+  const playerRankIndex = playerId
+    ? sortedRankings.findIndex(
+        (entry) => entry.ownerId === playerId || entry.memberIds.includes(playerId)
+      )
+    : -1;
+  const visibleRankings = isAdmin
+    ? sortedRankings.slice(0, 500)
+    : playerId
+    ? sortedRankings.filter(
+        (entry) => entry.ownerId === playerId || entry.memberIds.includes(playerId)
+      )
+    : undefined;
+
   return {
-    rankings: sortedRankings.slice(0, 500),
+    ...(visibleRankings !== undefined ? { rankings: visibleRankings } : {}),
+    ...(playerId ? { myRank: playerRankIndex >= 0 ? playerRankIndex + 1 : 0 } : {}),
     games: [...db.games]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 20),
@@ -262,7 +291,7 @@ async function startServer() {
 
   app.get('/api/state', async (req, res) => {
     const db = await ensureDb();
-    res.json(buildPublicState(db, isAdminRequest(req)));
+    res.json(buildPublicState(db, isAdminRequest(req), getPlayerId(req)));
   });
 
   app.get('/api/session', async (req, res) => {
@@ -330,6 +359,13 @@ async function startServer() {
     }
 
     if (action === 'createTeam') {
+      const accessCode = typeof payload.accessCode === 'string' ? payload.accessCode.trim() : '';
+      if (!accessCode || accessCode !== REGISTRATION_ACCESS_CODE) {
+        res.status(403).json({
+          error: 'Invalid access code. Please contact the organizer for the valid access code.',
+        });
+        return;
+      }
       const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
       if (rawName.length < 2 || rawName.length > 30) {
         res.status(400).json({ error: 'Team name must be between 2 and 30 characters.' });
@@ -411,13 +447,17 @@ async function startServer() {
         return;
       }
 
+      const hasLiveGame = db.games.some((entry) => entry.status === 'live');
+      const now = Date.now();
       let session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
       if (!session) {
         session = {
           id: `sess_${crypto.randomUUID().slice(0, 8)}`,
           teamId: team.id,
           caseId,
-          startedAt: Date.now(),
+          startedAt: now,
+          accumulatedElapsedSeconds: 0,
+          runningSince: hasLiveGame ? now : null,
           hintsUsed: 0,
           lastWriter: playerId,
           progress: {
@@ -429,12 +469,16 @@ async function startServer() {
         };
         db.sessions.push(session);
         await persistDb(db);
+      } else if (typeof session.accumulatedElapsedSeconds !== 'number') {
+        session.accumulatedElapsedSeconds = Math.max(0, Math.floor((now - session.startedAt) / 1000));
+        session.runningSince = hasLiveGame ? now : null;
+        await persistDb(db);
       }
 
       res.json({
         progress: session.progress,
         hintsUsed: session.hintsUsed,
-        elapsedSeconds: Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000)),
+        elapsedSeconds: getSessionElapsedSeconds(session, hasLiveGame),
       });
       return;
     }
@@ -530,10 +574,11 @@ async function startServer() {
         : [];
       const reportText = typeof payload.report === 'string' ? payload.report : '';
 
+      const hasLiveGame = db.games.some((entry) => entry.status === 'live');
       const session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
       const hintsUsed = session?.hintsUsed ?? 0;
       const elapsedSeconds = session
-        ? Math.max(1, Math.floor((Date.now() - session.startedAt) / 1000))
+        ? Math.max(1, getSessionElapsedSeconds(session, hasLiveGame))
         : 60;
 
       const graded = gradeCaseVerdict(caseId, timelineOrder, reportText, hintsUsed, elapsedSeconds);
@@ -544,6 +589,7 @@ async function startServer() {
 
       const caseResult: CaseScoreRecord = {
         score: graded.score,
+        maxScore: graded.maxScore,
         sequenceScore: graded.sequenceScore,
         summaryScore: graded.summaryScore,
         hintsUsed: graded.hintsUsed,
@@ -658,6 +704,9 @@ async function startServer() {
           return;
         }
 
+        const hadOnlyEndedGames =
+          db.games.length > 0 && db.games.every((entry) => entry.status === 'ended');
+
         const game: GameRecord = {
           id: `game_${crypto.randomUUID().slice(0, 8)}`,
           name,
@@ -670,6 +719,9 @@ async function startServer() {
           createdAt: new Date().toISOString(),
         };
         db.games.unshift(game);
+        if (hadOnlyEndedGames) {
+          db.sessions = db.sessions.filter((session) => session.completed);
+        }
         await persistDb(db);
         broadcastEvent('state', buildPublicState(db, false));
         res.json(game);
@@ -693,12 +745,46 @@ async function startServer() {
           res.status(404).json({ error: 'Event not found.' });
           return;
         }
+        const wasLive = db.games.some((entry) => entry.status === 'live');
         game.status = status;
         if (typeof payload.name === 'string' && payload.name.trim()) {
           game.name = payload.name.trim();
         }
         if (payload.durationMinutes !== undefined) {
           game.durationMinutes = normalizeGameDurationMinutes(payload.durationMinutes, game.name);
+        }
+        const isNowLive = db.games.some((entry) => entry.status === 'live');
+        const now = Date.now();
+        if (wasLive && !isNowLive) {
+          for (const session of db.sessions) {
+            if (session.completed) continue;
+            if (typeof session.accumulatedElapsedSeconds !== 'number') {
+              session.accumulatedElapsedSeconds = Math.max(
+                0,
+                Math.floor((now - session.startedAt) / 1000)
+              );
+              session.runningSince = null;
+            } else if (typeof session.runningSince === 'number') {
+              session.accumulatedElapsedSeconds += Math.max(
+                0,
+                Math.floor((now - session.runningSince) / 1000)
+              );
+              session.runningSince = null;
+            }
+          }
+        } else if (!wasLive && isNowLive) {
+          for (const session of db.sessions) {
+            if (session.completed) continue;
+            if (typeof session.accumulatedElapsedSeconds !== 'number') {
+              session.accumulatedElapsedSeconds = Math.max(
+                0,
+                Math.floor((now - session.startedAt) / 1000)
+              );
+            }
+            if (session.runningSince === null || session.runningSince === undefined) {
+              session.runningSince = now;
+            }
+          }
         }
         await persistDb(db);
         broadcastEvent('state', buildPublicState(db, false));
