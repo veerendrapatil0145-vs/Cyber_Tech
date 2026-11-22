@@ -33,7 +33,6 @@ import {
   Mail,
   Menu,
   MessageSquare,
-  Moon,
   Pause,
   Plus,
   QrCode,
@@ -58,9 +57,9 @@ import {
 } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
-import heroForensicDeskImg from './assets/images/hero_forensic_desk_1795330905949.jpg';
-import authCampusArchiveImg from './assets/images/auth_campus_archive_1795330905908.jpg';
-import caseArchiveBackdropImg from './assets/images/case_archive_backdrop_1795330906430.jpg';
+import heroForensicDeskImg from './assets/images/hero_cybersec_circuit_1795336448818.jpg';
+import authCampusArchiveImg from './assets/images/cybersec_light_canvas_1795336276523.jpg';
+import caseArchiveBackdropImg from './assets/images/cybersec_soc_backdrop_1795336277843.jpg';
 import { cases, getCaseMaxScore, type CaseDifficulty, type InvestigationCase } from './cases';
 import { gradeCaseVerdictLocally } from './caseAnswerFallback';
 import { isAdminUser, supabase, supabaseConfigured } from './supabase.js';
@@ -424,7 +423,6 @@ export default function App() {
   const mainRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState('');
   const [difficultyFilter, setDifficultyFilter] = useState<CaseDifficulty>('Easy');
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => stored('arena-theme', 'dark'));
   const [muted, setMuted] = useState<boolean>(() => stored('arena-muted', true));
   const [mobileMenu, setMobileMenu] = useState(false);
 
@@ -1112,9 +1110,9 @@ export default function App() {
   }, [activeCase, result, hasLiveEvent]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem('arena-theme', JSON.stringify(theme));
-  }, [theme]);
+    delete document.documentElement.dataset.theme;
+    localStorage.removeItem('arena-theme');
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('arena-muted', JSON.stringify(muted));
@@ -1742,15 +1740,15 @@ export default function App() {
         accessCode={accessCode}
         setAccessCode={setAccessCode}
         createTeam={createTeam}
-        theme={theme}
-        setTheme={setTheme}
       />
     );
   }
 
   return (
     <div className="app-shell">
-      <div className="ambient-grid" aria-hidden="true" />
+      <div className="ambient-grid" aria-hidden="true">
+        <img src={authCampusArchiveImg} alt="" referrerPolicy="no-referrer" />
+      </div>
       <aside className={`sidebar ${mobileMenu ? 'sidebar-open' : ''}`}>
         <button
           className="brand-lockup"
@@ -1893,14 +1891,6 @@ export default function App() {
                   : 'WAITING FOR ADMIN'}
               </span>
             </div>
-            <button
-              className="icon-button"
-              aria-label="Toggle light or dark appearance"
-              title="Toggle appearance"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            >
-              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-            </button>
             <button
               className="icon-button"
               aria-label="Toggle sound effects"
@@ -2074,8 +2064,6 @@ function TeamRegistration({
   accessCode,
   setAccessCode,
   createTeam,
-  theme,
-  setTheme,
 }: {
   user: User | null;
   authReady: boolean;
@@ -2088,8 +2076,6 @@ function TeamRegistration({
   accessCode: string;
   setAccessCode: (v: string) => void;
   createTeam: (e: FormEvent) => void;
-  theme: 'dark' | 'light';
-  setTheme: (t: 'dark' | 'light') => void;
 }) {
   const unavailable = !user || !authReady || !supabaseConfigured || teamBusy || teamLoading;
   return (
@@ -2098,14 +2084,6 @@ function TeamRegistration({
       <div className="team-entry-backdrop" aria-hidden="true">
         <img src={authCampusArchiveImg} alt="" referrerPolicy="no-referrer" />
       </div>
-      <button
-        type="button"
-        className="icon-button entry-theme-btn"
-        aria-label="Toggle light or dark appearance"
-        onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-      >
-        {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-      </button>
 
       <section className="team-entry-card">
         <span className="brand-mark team-entry-mark">
@@ -2313,7 +2291,7 @@ function HomeView({
       </section>
 
       <section className="stats-strip">
-        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <div className="stat-block backdrop-blur-md">
           <span className="stat-icon">
             <Users size={17} />
           </span>
@@ -2322,7 +2300,7 @@ function HomeView({
             <small>REGISTERED TEAMS</small>
           </div>
         </div>
-        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <div className="stat-block backdrop-blur-md">
           <span className="stat-icon">
             <FileText size={17} />
           </span>
@@ -2331,7 +2309,7 @@ function HomeView({
             <small>CASE FILES</small>
           </div>
         </div>
-        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <div className="stat-block backdrop-blur-md">
           <span className="stat-icon">
             {admin ? <Trophy size={17} /> : <Check size={17} />}
           </span>
@@ -2340,7 +2318,7 @@ function HomeView({
             <small>{admin ? 'TOP SCORE' : 'CASES SOLVED'}</small>
           </div>
         </div>
-        <div className="stat-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <div className="stat-block backdrop-blur-md">
           <span className="stat-icon">
             <Radio size={17} />
           </span>
@@ -2352,7 +2330,7 @@ function HomeView({
       </section>
 
       <section
-        className="section-block rules-section dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20"
+        className="section-block rules-section backdrop-blur-md"
         aria-labelledby="rules-heading"
       >
         <div className="section-heading">
@@ -2447,7 +2425,7 @@ function HomeView({
           onClick={() => setRulesModalOpen(false)}
         >
           <div
-            className="arena-modal-card dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            className="arena-modal-card backdrop-blur-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="arena-modal-head">
@@ -2488,13 +2466,13 @@ function HomeView({
                 </div>
                 <ul>
                   <li>
-                    <b className="text-emerald-400">Easy:</b> 50 PTS max (100% Answer Summary)
+                    <b className="text-emerald-600">Easy:</b> 50 PTS max (100% Answer Summary)
                   </li>
                   <li>
-                    <b className="text-amber-400">Medium:</b> 75 PTS max (100% Answer Summary)
+                    <b className="text-amber-600">Medium:</b> 75 PTS max (100% Answer Summary)
                   </li>
                   <li>
-                    <b className="text-rose-400">Hard:</b> 100 PTS max (50 Timeline + 50 Summary)
+                    <b className="text-rose-600">Hard:</b> 100 PTS max (50 Timeline + 50 Summary)
                   </li>
                   <li>Naming only the single culprit + supporting clue earns full summary points; naming multiple culprits reduces score.</li>
                 </ul>
@@ -2509,7 +2487,7 @@ function HomeView({
                 <ul>
                   <li>Each case includes up to 2 optional field hints.</li>
                   <li>
-                    Every unlocked hint deducts <b className="text-amber-400">-5 PTS</b> from that case&apos;s final score.
+                    Every unlocked hint deducts <b className="text-amber-600">-5 PTS</b> from that case&apos;s final score.
                   </li>
                   <li>Each case has a 5-minute clock; the arena total clock is {configuredGameMinutes} minutes.</li>
                 </ul>
@@ -2544,7 +2522,7 @@ function HomeView({
         </div>
       )}
 
-      <section className="section-block announcement-section dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+      <section className="section-block announcement-section backdrop-blur-md">
         <div className="section-heading">
           <div>
             <div className="eyebrow">ARENA DISPATCHES</div>
@@ -2968,16 +2946,16 @@ function CaseTile({
   const maxScore = getCaseMaxScore(gameCase.difficulty);
   const difficultyBadgeTone =
     gameCase.difficulty === 'Easy'
-      ? 'text-emerald-400'
+      ? 'text-emerald-600'
       : gameCase.difficulty === 'Medium'
-      ? 'text-amber-400'
-      : 'text-rose-400';
+      ? 'text-amber-600'
+      : 'text-rose-600';
 
   return (
     <motion.button
       className={`case-card ${featured ? 'case-featured' : ''} ${
         completed ? 'is-solved' : ''
-      } tone-${gameCase.color} dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20 hover:-translate-y-1 hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(20,184,166,0.15)]`}
+      } tone-${gameCase.color} backdrop-blur-md hover:-translate-y-1 hover:border-teal-600/45 hover:shadow-[0_12px_28px_-14px_rgba(13,148,136,0.22)]`}
       onClick={onClick}
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
@@ -2990,7 +2968,7 @@ function CaseTile({
         </span>
         <span className="case-card-badges">
           {completed && (
-            <span className="case-solved-indicator text-emerald-400">
+            <span className="case-solved-indicator text-emerald-600">
               <Check size={11} />
               <span>SOLVED</span>
             </span>
@@ -4044,7 +4022,7 @@ function AdminView({
       <div
         className={`admin-launch-banner ${
           hasLiveEvent ? 'is-live' : ''
-        } dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20`}
+        } backdrop-blur-md`}
       >
         <div className="archive-photo-backdrop" aria-hidden="true">
           <img src={caseArchiveBackdropImg} alt="" referrerPolicy="no-referrer" />
@@ -4227,7 +4205,7 @@ function AdminView({
           </div>
         )}
 
-        <div className="leaderboard-table-wrap dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <div className="leaderboard-table-wrap backdrop-blur-md">
           <div className="table-heading">
             <div>
               <span className="eyebrow">ADMINISTRATOR ONLY · LIVE STANDINGS</span>
@@ -4301,7 +4279,7 @@ function AdminView({
       </section>
 
       <div className="admin-grid">
-        <section className="section-block admin-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <section className="section-block admin-block backdrop-blur-md">
           <div className="section-heading">
             <div>
               <div className="eyebrow">TEAM ROSTER</div>
@@ -4326,7 +4304,7 @@ function AdminView({
           )}
         </section>
 
-        <section className="section-block admin-block dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20">
+        <section className="section-block admin-block backdrop-blur-md">
           <div className="section-heading">
             <div>
               <div className="eyebrow">ARENA DISPATCHES</div>
@@ -4374,7 +4352,7 @@ function AdminView({
           onClick={() => setConfirmPauseOpen(false)}
         >
           <div
-            className="arena-modal-card is-compact dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            className="arena-modal-card is-compact backdrop-blur-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="arena-modal-head">
@@ -4432,7 +4410,7 @@ function AdminView({
           onClick={() => setConfirmEndOpen(false)}
         >
           <div
-            className="arena-modal-card is-compact dark:bg-[#0c1926]/90 backdrop-blur-xl dark:border-teal-500/30"
+            className="arena-modal-card is-compact backdrop-blur-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="arena-modal-head">
@@ -4497,7 +4475,7 @@ function Metric({
   accent: 'lime' | 'cyan' | 'orange' | 'blue';
 }) {
   return (
-    <div className={`metric-card metric-${accent} dark:bg-[#0c1926]/75 backdrop-blur-md dark:border-teal-500/20`}>
+    <div className={`metric-card metric-${accent} backdrop-blur-md`}>
       <span className="metric-icon">
         <Icon size={17} />
       </span>
