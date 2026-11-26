@@ -124,6 +124,11 @@ interface ArenaDatabase {
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || 'ARENA-ADMIN-2026';
 const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion_2026';
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://erfbsolezxmdunjjthgq.supabase.co';
+const SUPABASE_ANON_KEY =
+  process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  'sb_publishable_xiq2MhpCfVsvmRTyAsG4Gg_5THnxlE5';
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const DB_FILE = path.join(DATA_DIR, 'arena.json');
 
@@ -138,6 +143,7 @@ const EMPTY_DB: ArenaDatabase = {
 let dbCache: ArenaDatabase | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 const activeAdminTokens = new Set<string>();
+const verifiedSupabaseAdmins = new Map<string, number>();
 const sseClients = new Set<Response>();
 
 async function ensureDb(): Promise<ArenaDatabase> {
@@ -207,14 +213,117 @@ function verifyLocalAdminToken(token: string): boolean {
   return expectedHex === sigHex;
 }
 
-function isAdminRequest(req: Request): boolean {
+function getRequestAdminToken(req: Request): string {
   const headerToken = req.header('x-arena-admin')?.trim() || '';
   const bodyToken =
     req.body && typeof (req.body as { adminToken?: unknown }).adminToken === 'string'
       ? (req.body as { adminToken: string }).adminToken.trim()
       : '';
-  const token = headerToken || bodyToken;
-  return verifyLocalAdminToken(token);
+  return headerToken || bodyToken;
+}
+
+function isAdminRequest(req: Request): boolean {
+  return verifyLocalAdminToken(getRequestAdminToken(req));
+}
+
+async function verifySupabaseAdmin(authHeader: string, adminToken: string): Promise<boolean> {
+  if (!authHeader.startsWith('Bearer ') || !SUPABASE_URL || !SUPABASE_ANON_KEY) return false;
+  const cacheKey = `${authHeader}:${adminToken}`;
+  const cachedExpiry = verifiedSupabaseAdmins.get(cacheKey);
+  if (cachedExpiry && cachedExpiry > Date.now()) {
+    return true;
+  }
+  try {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/arena`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: authHeader,
+        'Content-Type': 'application/json',
+        ...(adminToken ? { 'x-arena-admin': adminToken } : {}),
+      },
+      body: JSON.stringify({
+        action: 'adminListTeams',
+        ...(adminToken ? { adminToken } : {}),
+      }),
+    });
+    if (!response.ok) return false;
+    verifiedSupabaseAdmins.set(cacheKey, Date.now() + 5 * 60 * 1000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isAdminRequestAsync(req: Request): Promise<boolean> {
+  if (isAdminRequest(req)) return true;
+  const authHeader = req.header('authorization')?.trim() || '';
+  const adminToken = getRequestAdminToken(req);
+  if (!authHeader) return false;
+  if (!adminToken && req.header('x-arena-admin-check') !== '1') return false;
+  return verifySupabaseAdmin(authHeader, adminToken);
+}
+
+async function syncSupabaseTeamForPlayer(
+  db: ArenaDatabase,
+  authHeader: string,
+  playerId: string,
+  requestedTeamId?: string | null
+): Promise<TeamRecord | undefined> {
+  const localTeam = findTeamForPlayer(db, playerId, requestedTeamId);
+  if (localTeam) return localTeam;
+  if (!authHeader.startsWith('Bearer ') || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return undefined;
+  }
+  try {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/arena`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'listMyTeams' }),
+    });
+    if (!response.ok) return undefined;
+    const data = (await response.json()) as {
+      teams?: Array<{ id?: string; name?: string; inviteCode?: string }>;
+    };
+    const remoteTeams = Array.isArray(data.teams) ? data.teams : [];
+    const matched = requestedTeamId
+      ? remoteTeams.find((entry) => entry.id === requestedTeamId)
+      : remoteTeams[0];
+    if (!matched?.id || !matched?.name) return undefined;
+
+    let existing = db.teams.find((entry) => entry.id === matched.id);
+    if (!existing) {
+      existing = {
+        id: matched.id,
+        name: matched.name,
+        inviteCode: matched.inviteCode || generateInviteCode(6),
+        ownerId: playerId,
+        memberIds: [playerId],
+        createdAt: new Date().toISOString(),
+      };
+      db.teams.push(existing);
+    } else {
+      existing.name = matched.name;
+      if (!existing.memberIds.includes(playerId)) {
+        existing.memberIds.push(playerId);
+      }
+    }
+    await persistDb(db);
+    return existing;
+  } catch {
+    return undefined;
+  }
+}
+
+function maxCaseScoreById(caseId: string): number {
+  const num = Number(caseId.replace(/\D+/g, ''));
+  if (num >= 1 && num <= 5) return 50;
+  if (num >= 6 && num <= 15) return 75;
+  return 100;
 }
 
 function broadcastEvent(event: string, payload: unknown): void {
@@ -353,7 +462,8 @@ async function startServer() {
 
   app.get('/api/state', async (req, res) => {
     const db = await ensureDb();
-    res.json(buildPublicState(db, isAdminRequest(req), getPlayerId(req)));
+    const isAdmin = await isAdminRequestAsync(req);
+    res.json(buildPublicState(db, isAdmin, getPlayerId(req)));
   });
 
   app.get('/api/session', async (req, res) => {
@@ -499,7 +609,12 @@ async function startServer() {
     if (action === 'beginInvestigation') {
       const caseId = typeof payload.caseId === 'string' ? payload.caseId : '';
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
-      const team = findTeamForPlayer(db, playerId, requestedTeamId);
+      const team = await syncSupabaseTeamForPlayer(
+        db,
+        req.header('authorization') || '',
+        playerId,
+        requestedTeamId
+      );
       if (!team) {
         res.status(403).json({ error: 'Register a team before starting an investigation.' });
         return;
@@ -509,7 +624,10 @@ async function startServer() {
         return;
       }
 
-      const hasLiveGame = db.games.some((entry) => entry.status === 'live');
+      const hasLiveGame =
+        db.games.length > 0
+          ? db.games.some((entry) => entry.status === 'live')
+          : payload.isLiveGame !== false;
       const now = Date.now();
       let session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
       if (!session) {
@@ -548,7 +666,12 @@ async function startServer() {
     if (action === 'saveInvestigationProgress') {
       const caseId = typeof payload.caseId === 'string' ? payload.caseId : '';
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
-      const team = findTeamForPlayer(db, playerId, requestedTeamId);
+      const team = await syncSupabaseTeamForPlayer(
+        db,
+        req.header('authorization') || '',
+        playerId,
+        requestedTeamId
+      );
       if (!team) {
         res.status(403).json({ error: 'Team membership required.' });
         return;
@@ -582,7 +705,12 @@ async function startServer() {
     if (action === 'useInvestigationHint') {
       const caseId = typeof payload.caseId === 'string' ? payload.caseId : '';
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
-      const team = findTeamForPlayer(db, playerId, requestedTeamId);
+      const team = await syncSupabaseTeamForPlayer(
+        db,
+        req.header('authorization') || '',
+        playerId,
+        requestedTeamId
+      );
       if (!team) {
         res.status(403).json({ error: 'Team membership required.' });
         return;
@@ -606,7 +734,12 @@ async function startServer() {
     if (action === 'submitInvestigation') {
       const caseId = typeof payload.caseId === 'string' ? payload.caseId : '';
       const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
-      const team = findTeamForPlayer(db, playerId, requestedTeamId);
+      const team = await syncSupabaseTeamForPlayer(
+        db,
+        req.header('authorization') || '',
+        playerId,
+        requestedTeamId
+      );
       if (!team) {
         res.status(403).json({ error: 'Register a team before submitting a verdict.' });
         return;
@@ -621,7 +754,7 @@ async function startServer() {
       let ranking = db.rankings.find((entry) => entry.teamId === team.id);
       if (ranking && Object.hasOwn(ranking.caseScores, caseId)) {
         const existingResult = ranking.caseScores[caseId];
-        const sorted = [...db.rankings].sort((a, b) => b.score - a.score);
+        const sorted = [...db.rankings].sort(compareRankingRecords);
         const rank = sorted.findIndex((entry) => entry.teamId === team.id) + 1;
         res.json({
           ...existingResult,
@@ -636,12 +769,23 @@ async function startServer() {
         : [];
       const reportText = typeof payload.report === 'string' ? payload.report : '';
 
-      const hasLiveGame = db.games.some((entry) => entry.status === 'live');
+      const hasLiveGame =
+        db.games.length > 0
+          ? db.games.some((entry) => entry.status === 'live')
+          : payload.isLiveGame !== false;
       const session = db.sessions.find((entry) => entry.teamId === team.id && entry.caseId === caseId);
-      const hintsUsed = session?.hintsUsed ?? 0;
+      const clientHints =
+        typeof payload.hintsUsed === 'number' && Number.isFinite(payload.hintsUsed)
+          ? Math.max(0, Math.min(answerKey.maxHints ?? 2, Math.round(payload.hintsUsed)))
+          : 0;
+      const hintsUsed = Math.max(session?.hintsUsed ?? 0, clientHints);
+      const clientElapsed =
+        typeof payload.elapsedSeconds === 'number' && Number.isFinite(payload.elapsedSeconds)
+          ? Math.max(1, Math.min(3600, Math.round(payload.elapsedSeconds)))
+          : 60;
       const elapsedSeconds = session
         ? Math.max(1, getSessionElapsedSeconds(session, hasLiveGame))
-        : 60;
+        : clientElapsed;
 
       const graded = gradeCaseVerdict(caseId, timelineOrder, reportText, hintsUsed, elapsedSeconds);
       if (!graded) {
@@ -677,6 +821,7 @@ async function startServer() {
         };
         db.rankings.push(ranking);
       } else {
+        ranking.teamName = team.name;
         ranking.caseScores[caseId] = caseResult;
         ranking.score = Object.values(ranking.caseScores).reduce(
           (sum, entry) => sum + entry.score,
@@ -705,6 +850,96 @@ async function startServer() {
         rank,
         message: graded.message,
       });
+      return;
+    }
+
+    if (action === 'syncLocalScores') {
+      const requestedTeamId = typeof payload.teamId === 'string' ? payload.teamId : null;
+      const team = await syncSupabaseTeamForPlayer(
+        db,
+        req.header('authorization') || '',
+        playerId,
+        requestedTeamId
+      );
+      if (!team) {
+        res.status(403).json({ error: 'Register a team before syncing scores.' });
+        return;
+      }
+      const incoming =
+        payload.caseScores && typeof payload.caseScores === 'object'
+          ? (payload.caseScores as Record<string, Partial<CaseScoreRecord>>)
+          : {};
+
+      let ranking = db.rankings.find((entry) => entry.teamId === team.id);
+      let changed = false;
+      for (const [caseId, item] of Object.entries(incoming)) {
+        if (!caseAnswerKeys[caseId] || !item || typeof item !== 'object') continue;
+        if (ranking && Object.hasOwn(ranking.caseScores, caseId)) continue;
+        const maxScore = maxCaseScoreById(caseId);
+        const safeScore =
+          typeof item.score === 'number' && Number.isFinite(item.score)
+            ? Math.max(0, Math.min(maxScore, Math.round(item.score)))
+            : 0;
+        const safeElapsed =
+          typeof item.elapsedSeconds === 'number' && Number.isFinite(item.elapsedSeconds)
+            ? Math.max(1, Math.min(3600, Math.round(item.elapsedSeconds)))
+            : 60;
+        const caseResult: CaseScoreRecord = {
+          score: safeScore,
+          maxScore,
+          sequenceScore:
+            typeof item.sequenceScore === 'number' ? item.sequenceScore : undefined,
+          summaryScore:
+            typeof item.summaryScore === 'number' ? item.summaryScore : undefined,
+          hintsUsed:
+            typeof item.hintsUsed === 'number' ? Math.max(0, Math.round(item.hintsUsed)) : 0,
+          elapsedSeconds: safeElapsed,
+          submittedAt:
+            typeof item.submittedAt === 'string' ? item.submittedAt : new Date().toISOString(),
+          timelineMatches:
+            typeof item.timelineMatches === 'number' ? item.timelineMatches : 0,
+          totalTimeline:
+            typeof item.totalTimeline === 'number'
+              ? item.totalTimeline
+              : caseAnswerKeys[caseId].correctTimeline.length,
+          explanations: Array.isArray(item.explanations) ? item.explanations : [],
+        };
+        if (!ranking) {
+          ranking = {
+            id: `rank_${team.id}`,
+            teamId: team.id,
+            teamName: team.name,
+            ownerId: team.ownerId,
+            memberIds: [...team.memberIds],
+            mode: 'Team',
+            score: 0,
+            elapsedSeconds: 0,
+            caseScores: {},
+            updatedAt: new Date().toISOString(),
+          };
+          db.rankings.push(ranking);
+        }
+        ranking.caseScores[caseId] = caseResult;
+        changed = true;
+      }
+
+      if (changed && ranking) {
+        ranking.teamName = team.name;
+        ranking.score = Object.values(ranking.caseScores).reduce(
+          (sum, entry) => sum + entry.score,
+          0
+        );
+        ranking.elapsedSeconds = Object.values(ranking.caseScores).reduce(
+          (sum, entry) => sum + entry.elapsedSeconds,
+          0
+        );
+        ranking.memberIds = [...team.memberIds];
+        ranking.updatedAt = new Date().toISOString();
+        await persistDb(db);
+        broadcastEvent('state', buildPublicState(db, false));
+      }
+
+      res.json({ synced: changed });
       return;
     }
 

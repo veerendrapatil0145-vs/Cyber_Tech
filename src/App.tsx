@@ -384,6 +384,7 @@ function formatAnnouncementDate(createdAt?: string | { toDate?: () => Date }): s
 export default function App() {
   const [page, setPage] = useState<PageName>('Home');
   const [user, setUser] = useState<User | null>(null);
+  const [supabaseAccessToken, setSupabaseAccessToken] = useState<string>('');
   const [adminToken, setAdminToken] = useState<string>(() => stored<string>('arena-admin-token', ''));
   const [admin, setAdmin] = useState<boolean>(() => Boolean(stored<string>('arena-admin-token', '')));
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
@@ -404,6 +405,7 @@ export default function App() {
   const [teamBusy, setTeamBusy] = useState(false);
   const [teamLoading, setTeamLoading] = useState(false);
   const [leaderboard, setLeaderboard] = useState<RankingEntry[]>([]);
+  const [serverRankings, setServerRankings] = useState<RankingEntry[]>([]);
   const [serverMyRank, setServerMyRank] = useState<number | null>(null);
   const [localRankings, setLocalRankings] = useState<Record<string, Record<string, CaseScore>>>(() =>
     stored<Record<string, Record<string, CaseScore>>>('arena-local-rankings', {})
@@ -416,7 +418,9 @@ export default function App() {
   const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(null);
   const [gameClock, setGameClock] = useState<GameClockState>(EMPTY_GAME_CLOCK);
   const [gameElapsed, setGameElapsed] = useState(0);
+  const serverCaseModeRef = useRef(false);
   const caseFallbackRef = useRef(false);
+  const syncedLocalTeamsRef = useRef<Set<string>>(new Set());
   const submittingLockRef = useRef(false);
   const autoClosedCaseKeyRef = useRef<string | null>(null);
   const finalizeSubmissionRef = useRef<(isAutoExpired?: boolean) => Promise<void>>(async () => {});
@@ -438,6 +442,7 @@ export default function App() {
     } = client.auth.onAuthStateChange((event, session) => {
       const currentUser = session?.user || null;
       setUser(currentUser);
+      setSupabaseAccessToken(session?.access_token || '');
       setAdmin(isAdminUser(currentUser) || Boolean(stored<string>('arena-admin-token', '')));
       setAuthReady(true);
       if (event === 'INITIAL_SESSION' && !currentUser && !creatingAnonymousSession) {
@@ -488,6 +493,9 @@ export default function App() {
       if (adminToken) {
         headers['x-arena-admin'] = adminToken;
       }
+      if (supabaseAccessToken) {
+        headers.Authorization = `Bearer ${supabaseAccessToken}`;
+      }
       const response = await fetch('/api/arena', {
         method: 'POST',
         headers,
@@ -499,8 +507,38 @@ export default function App() {
       }
       return body;
     },
-    [user?.id, adminToken]
+    [user?.id, adminToken, supabaseAccessToken]
   );
+
+  const fetchSharedServerState = useCallback(async () => {
+    if (!user) return;
+    try {
+      const stateHeaders: Record<string, string> = { 'x-arena-player': user.id };
+      if (adminToken) {
+        stateHeaders['x-arena-admin'] = adminToken;
+      }
+      if (supabaseAccessToken) {
+        stateHeaders.Authorization = `Bearer ${supabaseAccessToken}`;
+      }
+      if (admin) {
+        stateHeaders['x-arena-admin-check'] = '1';
+      }
+      const response = await fetch('/api/state', { headers: stateHeaders });
+      if (!response.ok) return;
+      const payload = (await response.json()) as {
+        rankings?: Record<string, unknown>[];
+        myRank?: number;
+      };
+      if (Array.isArray(payload.rankings)) {
+        setServerRankings(payload.rankings.map(mapRanking));
+      }
+      if (typeof payload.myRank === 'number' && payload.myRank > 0) {
+        setServerMyRank(payload.myRank);
+      }
+    } catch {
+      // Keep existing shared server fallback rankings if offline.
+    }
+  }, [user, adminToken, supabaseAccessToken, admin]);
 
   useEffect(() => {
     if (!user) return undefined;
@@ -616,6 +654,7 @@ export default function App() {
       void loadRankings();
       void loadGames();
       void loadAnnouncements();
+      void fetchSharedServerState();
     };
     reload();
     const channel = client
@@ -628,10 +667,20 @@ export default function App() {
         loadAnnouncements
       )
       .subscribe();
+
+    let source: EventSource | null = null;
+    if (typeof EventSource !== 'undefined') {
+      source = new EventSource('/api/stream');
+      source.addEventListener('state', () => {
+        void fetchSharedServerState();
+      });
+    }
+
     return () => {
       void client.removeChannel(channel);
+      source?.close();
     };
-  }, [user, useLocalBackend, adminToken]);
+  }, [user, useLocalBackend, adminToken, fetchSharedServerState]);
 
   const refreshArenaData = useCallback(async () => {
     if (!user) return;
@@ -669,6 +718,7 @@ export default function App() {
       client.from('games').select('*').order('created_at', { ascending: false }).limit(20),
       client.from('announcements').select('*').order('created_at', { ascending: false }).limit(4),
       client.from('stats').select('registered_teams').eq('id', 1).maybeSingle(),
+      fetchSharedServerState(),
     ]);
     if (!rankingsRes.error) setLeaderboard((rankingsRes.data || []).map(mapRanking));
     if (!gamesRes.error) setGames((gamesRes.data || []).map(mapGame));
@@ -676,7 +726,7 @@ export default function App() {
     if (!statsRes.error && statsRes.data) {
       setRegisteredCount(statsRes.data.registered_teams ?? 0);
     }
-  }, [user, useLocalBackend, adminToken]);
+  }, [user, useLocalBackend, adminToken, fetchSharedServerState]);
 
   useEffect(() => {
     if (!supabase || useLocalBackend) return undefined;
@@ -865,6 +915,13 @@ export default function App() {
     localStorage.removeItem('arena-admin-token');
     setAdminToken('');
     setAdmin(isAdminUser(user));
+    setServerRankings((prev) =>
+      prev.filter(
+        (entry) =>
+          entry.teamId === teamInfo?.id ||
+          (user?.id ? entry.ownerId === user.id || entry.memberIds?.includes(user.id) : false)
+      )
+    );
     setNotice('Admin console locked.');
   };
 
@@ -1092,16 +1149,42 @@ export default function App() {
     }
     if (!sessionReady || !user || result) return undefined;
     const timeout = window.setTimeout(() => {
-      void invoke('saveInvestigationProgress', {
+      const progressPayload = {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
         report,
         selectedEvidence,
         timelineOrder,
-      }).catch(() => {});
+      };
+      if (serverCaseModeRef.current) {
+        void callLocalArena('saveInvestigationProgress', progressPayload).catch(() => {});
+      } else {
+        void invoke('saveInvestigationProgress', progressPayload).catch(() => {});
+      }
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, user, teamInfo, result, invoke]);
+  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, user, teamInfo, result, invoke, callLocalArena]);
+
+  useEffect(() => {
+    if (!user || !teamInfo || !supabaseAccessToken) return;
+    const existingLocal = localRankings[teamInfo.id];
+    if (!existingLocal || Object.keys(existingLocal).length === 0) return;
+    const syncKey = `${teamInfo.id}:${Object.keys(existingLocal).sort().join(',')}`;
+    if (syncedLocalTeamsRef.current.has(syncKey)) return;
+    syncedLocalTeamsRef.current.add(syncKey);
+    void callLocalArena<{ synced?: boolean }>('syncLocalScores', {
+      teamId: teamInfo.id,
+      caseScores: existingLocal,
+    })
+      .then((res) => {
+        if (res.synced) {
+          void fetchSharedServerState();
+        }
+      })
+      .catch(() => {
+        syncedLocalTeamsRef.current.delete(syncKey);
+      });
+  }, [user, teamInfo, supabaseAccessToken, localRankings, callLocalArena, fetchSharedServerState]);
 
   useEffect(() => {
     if (!activeCase || result || !hasLiveEvent) return undefined;
@@ -1119,10 +1202,48 @@ export default function App() {
   }, [muted]);
 
   const effectiveLeaderboard = useMemo(() => {
-    const merged = leaderboard.map((entry) => ({
-      ...entry,
-      caseScores: { ...(entry.caseScores || {}) },
-    }));
+    const merged: RankingEntry[] = [];
+    const findExistingTarget = (incoming: RankingEntry) =>
+      merged.find(
+        (entry) =>
+          (incoming.teamId && (entry.teamId === incoming.teamId || entry.id === `local_${incoming.teamId}` || entry.id === `team_${incoming.teamId}`)) ||
+          (incoming.teamName &&
+            entry.teamName &&
+            entry.teamName.trim().toLowerCase() === incoming.teamName.trim().toLowerCase()) ||
+          entry.id === incoming.id
+      );
+
+    const mergeEntry = (entry: RankingEntry) => {
+      const target = findExistingTarget(entry);
+      if (!target) {
+        merged.push({
+          ...entry,
+          mode: entry.mode || 'Team',
+          caseScores: { ...(entry.caseScores || {}) },
+        });
+        return;
+      }
+      target.teamName = target.teamName || entry.teamName;
+      target.teamId = target.teamId || entry.teamId;
+      target.ownerId = target.ownerId || entry.ownerId;
+      target.memberIds = [...new Set([...(target.memberIds || []), ...(entry.memberIds || [])])];
+      target.caseScores = {
+        ...(entry.caseScores || {}),
+        ...(target.caseScores || {}),
+      };
+      const values = Object.values(target.caseScores || {});
+      if (values.length > 0) {
+        target.score = values.reduce((sum, item) => sum + (item.score || 0), 0);
+        target.elapsedSeconds = values.reduce((sum, item) => sum + (item.elapsedSeconds || 0), 0);
+      } else if ((entry.score || 0) > (target.score || 0)) {
+        target.score = entry.score;
+        target.elapsedSeconds = entry.elapsedSeconds;
+      }
+    };
+
+    for (const entry of leaderboard) mergeEntry(entry);
+    for (const entry of serverRankings) mergeEntry(entry);
+
     for (const [tId, extraScores] of Object.entries(localRankings)) {
       let target = merged.find(
         (entry) =>
@@ -1158,14 +1279,23 @@ export default function App() {
     }
     return merged.sort((a, b) => {
       if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
-      return (a.elapsedSeconds || 0) - (b.elapsedSeconds || 0);
+      const aCases = Object.keys(a.caseScores || {}).length;
+      const bCases = Object.keys(b.caseScores || {}).length;
+      if (bCases !== aCases) return bCases - aCases;
+      if (aCases > 0 && bCases > 0 && (a.elapsedSeconds || 0) !== (b.elapsedSeconds || 0)) {
+        return (a.elapsedSeconds || 0) - (b.elapsedSeconds || 0);
+      }
+      return (a.teamName || '').localeCompare(b.teamName || '');
     });
-  }, [leaderboard, localRankings, teamInfo, user?.id]);
+  }, [leaderboard, serverRankings, localRankings, teamInfo, user?.id]);
 
   const completed = useMemo(() => {
     const localCompleted = stored<string[]>('arena-completed', []);
     const teamRanking = effectiveLeaderboard.find(
-      (score) => score.mode === 'Team' && (user?.id ? score.memberIds?.includes(user.id) : false)
+      (score) =>
+        score.teamId === teamInfo?.id ||
+        score.id === `local_${teamInfo?.id}` ||
+        (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false)
     );
     const serverClosed = teamRanking ? Object.keys(teamRanking.caseScores || {}) : [];
     const localTeamClosed = teamInfo ? Object.keys(localRankings[teamInfo.id] || {}) : [];
@@ -1176,16 +1306,15 @@ export default function App() {
     () =>
       effectiveLeaderboard.find(
         (score) =>
-          score.mode === 'Team' &&
-          (score.teamId === teamInfo?.id ||
-            score.id === `local_${teamInfo?.id}` ||
-            (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false))
+          score.teamId === teamInfo?.id ||
+          score.id === `local_${teamInfo?.id}` ||
+          (user?.id ? score.ownerId === user.id || score.memberIds?.includes(user.id) : false)
       ) || null,
     [effectiveLeaderboard, teamInfo?.id, user?.id]
   );
 
   const fallbackTeamRankIndex = useMemo(() => {
-    const teamList = effectiveLeaderboard.filter((score) => score.mode === 'Team');
+    const teamList = effectiveLeaderboard.filter((score) => !score.mode || score.mode === 'Team');
     return teamList.findIndex(
       (score) =>
         score.teamId === teamInfo?.id ||
@@ -1195,7 +1324,7 @@ export default function App() {
   }, [effectiveLeaderboard, teamInfo?.id, user?.id]);
 
   const myRank =
-    typeof serverMyRank === 'number'
+    typeof serverMyRank === 'number' && serverMyRank > 0
       ? serverMyRank
       : fallbackTeamRankIndex >= 0
       ? fallbackTeamRankIndex + 1
@@ -1316,16 +1445,15 @@ export default function App() {
     setResult(null);
     setNotice('');
     playSignal(muted, 540);
-    try {
-      const session = await invoke<{
-        progress?: {
-          report?: string;
-          selectedEvidence?: number[];
-          timelineOrder?: string[];
-        };
-        hintsUsed?: number;
-        elapsedSeconds?: number;
-      }>('beginInvestigation', { caseId: gameCase.id, teamId: teamInfo?.id || null });
+    const applySessionResponse = (session: {
+      progress?: {
+        report?: string;
+        selectedEvidence?: number[];
+        timelineOrder?: string[];
+      };
+      hintsUsed?: number;
+      elapsedSeconds?: number;
+    }) => {
       const remoteProgress = session.progress || {};
       const hasRemote =
         (remoteProgress.selectedEvidence?.length || 0) > 0 ||
@@ -1343,9 +1471,58 @@ export default function App() {
       setHintCount(session.hintsUsed || 0);
       setElapsed(session.elapsedSeconds || 0);
       setSessionReady(true);
+    };
+
+    try {
+      const beginPayload = {
+        caseId: gameCase.id,
+        teamId: teamInfo?.id || null,
+        isLiveGame: hasLiveEvent,
+      };
+      const session = serverCaseModeRef.current
+        ? await callLocalArena<{
+            progress?: {
+              report?: string;
+              selectedEvidence?: number[];
+              timelineOrder?: string[];
+            };
+            hintsUsed?: number;
+            elapsedSeconds?: number;
+          }>('beginInvestigation', beginPayload)
+        : await invoke<{
+            progress?: {
+              report?: string;
+              selectedEvidence?: number[];
+              timelineOrder?: string[];
+            };
+            hintsUsed?: number;
+            elapsedSeconds?: number;
+          }>('beginInvestigation', beginPayload);
+      applySessionResponse(session);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unable to start investigation.';
       if (isMissingRemoteCaseError(msg)) {
+        try {
+          const serverSession = await callLocalArena<{
+            progress?: {
+              report?: string;
+              selectedEvidence?: number[];
+              timelineOrder?: string[];
+            };
+            hintsUsed?: number;
+            elapsedSeconds?: number;
+          }>('beginInvestigation', {
+            caseId: gameCase.id,
+            teamId: teamInfo?.id || null,
+            isLiveGame: hasLiveEvent,
+          });
+          serverCaseModeRef.current = true;
+          caseFallbackRef.current = false;
+          applySessionResponse(serverSession);
+          return;
+        } catch {
+          // Fall back to browser-local session only if the Express server is also unreachable.
+        }
         caseFallbackRef.current = true;
         const localSess = ensureLocalSession(gameCase.id);
         const hasSaved =
@@ -1394,15 +1571,30 @@ export default function App() {
     }
     setHintBusy(true);
     try {
-      const response = await invoke<{ hintsUsed: number }>('useInvestigationHint', {
+      const hintPayload = {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
-      });
+      };
+      const response = serverCaseModeRef.current
+        ? await callLocalArena<{ hintsUsed: number }>('useInvestigationHint', hintPayload)
+        : await invoke<{ hintsUsed: number }>('useInvestigationHint', hintPayload);
       setHintCount(response.hintsUsed);
       playSignal(muted, 480);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unable to unlock hint.';
       if (isMissingRemoteCaseError(msg)) {
+        try {
+          const response = await callLocalArena<{ hintsUsed: number }>('useInvestigationHint', {
+            caseId: activeCase.id,
+            teamId: teamInfo?.id || null,
+          });
+          serverCaseModeRef.current = true;
+          setHintCount(response.hintsUsed);
+          playSignal(muted, 480);
+          return;
+        } catch {
+          // Fall back to local hint if Express server is unreachable.
+        }
         caseFallbackRef.current = true;
         applyLocalHint(activeCase);
       } else {
@@ -1459,6 +1651,7 @@ export default function App() {
         setServerMyRank(scorePayload.rank);
       }
       setSessionReady(false);
+      void fetchSharedServerState();
       setNotice(
         isAutoExpired
           ? `Time expired (${targetCase.duration}:00) for "${targetCase.title}". Case closed automatically — review your points and answer summary below.`
@@ -1466,15 +1659,22 @@ export default function App() {
       );
     };
 
+    const submitPayload = {
+      caseId: targetCase.id,
+      selectedEvidence,
+      timelineOrder,
+      report,
+      teamId: teamInfo?.id || null,
+      hintsUsed: hintCount,
+      elapsedSeconds: elapsed,
+      isLiveGame: hasLiveEvent,
+    };
+
     try {
       if (!caseFallbackRef.current) {
-        const response = await invoke<CaseScore>('submitInvestigation', {
-          caseId: targetCase.id,
-          selectedEvidence,
-          timelineOrder,
-          report,
-          teamId: teamInfo?.id || null,
-        });
+        const response = serverCaseModeRef.current
+          ? await callLocalArena<CaseScore>('submitInvestigation', submitPayload)
+          : await invoke<CaseScore>('submitInvestigation', submitPayload);
         finishWithResult(response);
         return;
       }
@@ -1497,6 +1697,15 @@ export default function App() {
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Submission failed.';
       if (isMissingRemoteCaseError(msg) || isAutoExpired) {
+        try {
+          const serverResponse = await callLocalArena<CaseScore>('submitInvestigation', submitPayload);
+          serverCaseModeRef.current = true;
+          caseFallbackRef.current = false;
+          finishWithResult(serverResponse);
+          return;
+        } catch {
+          // Fall back to local grading only if Express server is unreachable.
+        }
         caseFallbackRef.current = true;
         const fallbackResult = gradeCaseVerdictLocally(
           targetCase.id,
@@ -1603,7 +1812,11 @@ export default function App() {
       localStorage.removeItem('arena-local-sessions');
       localStorage.removeItem('arena-local-rankings');
       setLocalRankings({});
+      setServerRankings([]);
       setServerMyRank(null);
+      syncedLocalTeamsRef.current.clear();
+      serverCaseModeRef.current = false;
+      caseFallbackRef.current = false;
       setGameClock(EMPTY_GAME_CLOCK);
       setGameElapsed(0);
       setAdminToken('');
