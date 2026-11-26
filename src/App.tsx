@@ -2637,7 +2637,7 @@ function HomeView({
             <ul className="rules-list">
               <li>One player per registered team in a single browser tab.</li>
               <li>No source inspection, server probing, or cross-team answer sharing.</li>
-              <li>Decisions of the <b>Avon Event Coordinators</b> are final.</li>
+              <li>Decisions of the <b>Avion Event Coordinators</b> are final.</li>
             </ul>
           </article>
         </div>
@@ -2730,7 +2730,7 @@ function HomeView({
                   <li>One participant per registered team in a single browser tab.</li>
                   <li>No browser DevTools inspection, server probing, or automated scripts.</li>
                   <li>No cross-team answer sharing during active competition.</li>
-                  <li>All decisions by the Avon Event Coordinators are final.</li>
+                  <li>All decisions by the Avion Event Coordinators are final.</li>
                 </ul>
               </div>
             </div>

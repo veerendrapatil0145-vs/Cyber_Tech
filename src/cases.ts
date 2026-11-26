@@ -60,7 +60,7 @@ export const cases: InvestigationCase[] = [
     icon: 'key',
     color: 'cyan',
     briefing:
-      'Someone unlocked the Avon registration laptop during break and changed team names to memes. A red IEEE committee lanyard was found dropped right beside the laptop.',
+      'Someone unlocked the Avion registration laptop during break and changed team names to memes. A red IEEE committee lanyard was found dropped right beside the laptop.',
     incident: 'Dropped red IEEE lanyard and volunteer logistics color register.',
     evidence: [
       {
@@ -218,7 +218,7 @@ export const cases: InvestigationCase[] = [
     icon: 'database',
     color: 'emerald',
     briefing:
-      'The Avon promo video on the lobby TV was replaced with a funny cartoon clip. A blue SanDisk 32GB USB drive was found dropped right below the lobby TV.',
+      'The Avion promo video on the lobby TV was replaced with a funny cartoon clip. A blue SanDisk 32GB USB drive was found dropped right below the lobby TV.',
     incident: 'Dropped blue SanDisk USB drive and lobby TV external media history.',
     evidence: [
       {
@@ -378,7 +378,7 @@ export const cases: InvestigationCase[] = [
   },
   {
     id: 'case-07',
-    title: 'The Leaked Avon Poster Reflection',
+    title: 'The Leaked Avion Poster Reflection',
     subtitle: 'Screen Reflection & Instagram Story Matching',
     category: 'Visual Reflection & OSINT',
     difficulty: 'Medium',
@@ -386,13 +386,13 @@ export const cases: InvestigationCase[] = [
     icon: 'globe',
     color: 'cyan',
     briefing:
-      'The official Avon Fest 2026 launch poster was leaked on an anonymous Instagram page before the reveal. Only four design team volunteers had the file.',
+      'The official Avion Fest 2026 launch poster was leaked on an anonymous Instagram page before the reveal. Only four design team volunteers had the file.',
     incident: 'Leaked laptop screen photo with glass reflection and 04:00 PM Instagram stories.',
     evidence: [
       {
         type: 'IMAGE EVIDENCE',
         title: 'Leaked Poster Laptop Photo',
-        detail: 'Leaked photo of the Avon Fest 2026 poster open on a laptop screen.',
+        detail: 'Leaked photo of the Avion Fest 2026 poster open on a laptop screen.',
         image: '/assets/cases/case-07-reflection.png',
       },
       {
@@ -824,7 +824,7 @@ export const cases: InvestigationCase[] = [
     icon: 'footprints',
     color: 'emerald',
     briefing:
-      'Two Avon hoodies were taken from the merchandise stall using a fake payment screen, and a red KSRTC bus ticket was found dropped right at the counter.',
+      'Two Avion hoodies were taken from the merchandise stall using a fake payment screen, and a red KSRTC bus ticket was found dropped right at the counter.',
     incident: 'Dropped morning Indi-to-Bagalkote KSRTC bus ticket and 03:10 PM Stall CCTV.',
     evidence: [
       {
@@ -1725,7 +1725,7 @@ export const cases: InvestigationCase[] = [
     icon: 'code',
     color: 'rose',
     briefing:
-      'All 30 VIP front-row passes for the Avon concert night sold out in 3 seconds, with every pass booked by a single account.',
+      'All 30 VIP front-row passes for the Avion concert night sold out in 3 seconds, with every pass booked by a single account.',
     incident: 'Ticketing website 3-second burst log and Hostel Block C Wi-Fi connection record.',
     evidence: [
       {
