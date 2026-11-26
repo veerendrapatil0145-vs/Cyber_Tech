@@ -76,6 +76,7 @@ interface TeamInfo {
   id: string;
   name: string;
   inviteCode?: string;
+  slot?: number;
 }
 
 interface CaseScore {
@@ -299,6 +300,84 @@ function computeClockElapsed(clock: GameClockState, now = Date.now()): number {
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+}
+
+const DIFFICULTY_TIERS: CaseDifficulty[] = ['Easy', 'Medium', 'Hard'];
+
+function hashTeamSeed(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function gcdInt(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x || 1;
+}
+
+function getCoprimeStrides(length: number): number[] {
+  const strides: number[] = [];
+  for (let s = 1; s < length; s += 1) {
+    if (gcdInt(s, length) === 1) {
+      strides.push(s);
+    }
+  }
+  return strides.length ? strides : [1];
+}
+
+function permuteTierCases(
+  tierCases: InvestigationCase[],
+  seed: number,
+  tierIndex: number
+): InvestigationCase[] {
+  const count = tierCases.length;
+  if (count <= 1) return tierCases;
+  const strides = getCoprimeStrides(count);
+  const tierStartOffsets = [0, 3, 7];
+  const tierStrideShifts = [1, 1, 2];
+  const block = Math.floor(seed / count);
+  const start = (seed + (tierStartOffsets[tierIndex] ?? 0)) % count;
+  const stride = strides[(block + (tierStrideShifts[tierIndex] ?? 0)) % strides.length];
+  const ordered: InvestigationCase[] = [];
+  for (let step = 0; step < count; step += 1) {
+    ordered.push(tierCases[(start + step * stride) % count]);
+  }
+  return ordered;
+}
+
+function orderCasesForTeam(
+  allCases: InvestigationCase[],
+  team: TeamInfo | null,
+  inProgressCaseId: string | null,
+  completedIds: string[]
+): InvestigationCase[] {
+  const orderedAll: InvestigationCase[] = [];
+  DIFFICULTY_TIERS.forEach((tier, tierIndex) => {
+    const tierCases = allCases.filter((item) => item.difficulty === tier);
+    const seed =
+      typeof team?.slot === 'number' && team.slot >= 0
+        ? team.slot
+        : hashTeamSeed(`${team?.id || 'solo'}:${tier}`);
+    const permuted = permuteTierCases(tierCases, seed, tierIndex);
+    if (inProgressCaseId && !completedIds.includes(inProgressCaseId)) {
+      const pinnedIndex = permuted.findIndex((item) => item.id === inProgressCaseId);
+      if (pinnedIndex > 0) {
+        const [pinned] = permuted.splice(pinnedIndex, 1);
+        permuted.unshift(pinned);
+      }
+    }
+    orderedAll.push(...permuted);
+  });
+  return orderedAll;
 }
 
 function playSignal(muted: boolean, frequency = 620) {
@@ -1348,6 +1427,12 @@ export default function App() {
       : 0;
   const teamScore = myTeamEntry?.score ?? 0;
 
+  const orderedCases = useMemo(() => {
+    const savedProgress = stored<{ caseId?: string } | null>('arena-progress', null);
+    const pinnedCaseId = activeCase?.id || savedProgress?.caseId || null;
+    return orderCasesForTeam(cases, teamInfo, pinnedCaseId, completed);
+  }, [teamInfo, activeCase?.id, completed]);
+
   const activeOrLatestGame = useMemo(
     () =>
       games.find((game) => game.status === 'live') ||
@@ -1776,7 +1861,7 @@ export default function App() {
   const createTeam = async (event: FormEvent) => {
     event.preventDefault();
     const trimmedCode = accessCode.trim();
-    if (!trimmedCode || trimmedCode !== 'Avion_2026') {
+    if (!trimmedCode || trimmedCode !== 'Avion@2026') {
       setTeamEntryError('Invalid access code. Please contact the organizer for the valid access code.');
       return;
     }
@@ -2219,7 +2304,7 @@ export default function App() {
                     teamScore={teamScore}
                     myRank={myRank}
                     completed={completed}
-                    cases={cases}
+                    cases={orderedCases}
                     hasLiveEvent={hasLiveEvent}
                     isGamePaused={isGamePaused}
                     isGameEnded={isGameEnded}
@@ -2229,7 +2314,7 @@ export default function App() {
                 )}
                 {page === 'Play Investigation' && (
                   <CaseLibrary
-                    visibleCases={cases}
+                    visibleCases={orderedCases}
                     openCase={openCase}
                     completed={completed}
                     search={search}
@@ -2245,7 +2330,7 @@ export default function App() {
                   />
                 )}
                 {page === 'My History' && (
-                  <HistoryView completed={completed} cases={cases} openCase={openCase} />
+                  <HistoryView completed={completed} cases={orderedCases} openCase={openCase} />
                 )}
               </>
             )}
@@ -3070,18 +3155,36 @@ function CaseLibrary({
     );
   }
 
-  const countByDifficulty: Record<CaseDifficulty, number> = {
-    Easy: visibleCases.filter((item) => item.difficulty === 'Easy').length,
-    Medium: visibleCases.filter((item) => item.difficulty === 'Medium').length,
-    Hard: visibleCases.filter((item) => item.difficulty === 'Hard').length,
+  const statsByDifficulty: Record<
+    CaseDifficulty,
+    { total: number; solved: number; activeCase: InvestigationCase | null; visibleInTier: InvestigationCase[] }
+  > = {
+    Easy: { total: 0, solved: 0, activeCase: null, visibleInTier: [] },
+    Medium: { total: 0, solved: 0, activeCase: null, visibleInTier: [] },
+    Hard: { total: 0, solved: 0, activeCase: null, visibleInTier: [] },
   };
 
-  const foundCases = visibleCases.filter((gameCase) => {
-    const matchesDifficulty = gameCase.difficulty === difficultyFilter;
+  for (const tier of DIFFICULTY_TIERS) {
+    const tierCases = visibleCases.filter((item) => item.difficulty === tier);
+    const solvedInTier = tierCases.filter((item) => completed.includes(item.id));
+    const activeAssigned = tierCases.find((item) => !completed.includes(item.id)) || null;
+    statsByDifficulty[tier] = {
+      total: tierCases.length,
+      solved: solvedInTier.length,
+      activeCase: activeAssigned,
+      visibleInTier: admin
+        ? tierCases
+        : [...(activeAssigned ? [activeAssigned] : []), ...solvedInTier],
+    };
+  }
+
+  const currentTierStats = statsByDifficulty[difficultyFilter];
+
+  const foundCases = currentTierStats.visibleInTier.filter((gameCase) => {
     const matchesSearch = `${gameCase.id} ${gameCase.title} ${gameCase.subtitle} ${gameCase.category} ${gameCase.difficulty}`
       .toLowerCase()
       .includes(search.toLowerCase());
-    return matchesDifficulty && matchesSearch;
+    return matchesSearch;
   });
 
   return (
@@ -3092,8 +3195,16 @@ function CaseLibrary({
         description="Select Easy (50 pts), Medium (75 pts), or Hard (100 pts · Timeline Builder) investigations."
         action={
           <div className="case-total">
-            <strong>{foundCases.length.toString().padStart(2, '0')}</strong>
-            <small>{difficultyFilter.toUpperCase()} FILES</small>
+            <strong>
+              {admin
+                ? foundCases.length.toString().padStart(2, '0')
+                : `${currentTierStats.solved}/${currentTierStats.total}`}
+            </strong>
+            <small>
+              {admin
+                ? `${difficultyFilter.toUpperCase()} FILES`
+                : `${difficultyFilter.toUpperCase()} SOLVED`}
+            </small>
           </div>
         }
       />
@@ -3110,7 +3221,11 @@ function CaseLibrary({
               onClick={() => setDifficultyFilter(tier)}
             >
               <span>{tier}</span>
-              <small>{countByDifficulty[tier]}</small>
+              <small>
+                {admin
+                  ? statsByDifficulty[tier].total
+                  : `${statsByDifficulty[tier].solved}/${statsByDifficulty[tier].total}`}
+              </small>
             </button>
           ))}
         </div>
@@ -3124,6 +3239,17 @@ function CaseLibrary({
             aria-label="Search case files"
           />
         </label>
+      </div>
+
+      <div className="simulation-note">
+        <Compass size={15} />
+        <span>
+          {admin
+            ? `Organizer view active: showing all ${currentTierStats.total} ${difficultyFilter.toLowerCase()} case files. Participants receive 1 unique active case per level at a time.`
+            : currentTierStats.activeCase
+            ? `Assigned uniquely to your team: complete your active ${difficultyFilter} case (${currentTierStats.activeCase.id.toUpperCase()}) to unlock the next ${difficultyFilter.toLowerCase()} file. Easy, Medium, and Hard tiers stay separate.`
+            : `All ${currentTierStats.total} ${difficultyFilter} cases solved! Switch to another difficulty tab above to continue.`}
+        </span>
       </div>
 
       <div className="case-grid">

@@ -620,23 +620,31 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'listMyTeams') {
-      const { data, error } = await adminClient
-        .from('teams')
-        .select('id, name, invite_code')
-        .contains('member_ids', [user.id]);
+      const [{ data, error }, { data: orderedTeams }] = await Promise.all([
+        adminClient
+          .from('teams')
+          .select('id, name, invite_code')
+          .contains('member_ids', [user.id]),
+        adminClient
+          .from('teams')
+          .select('id')
+          .order('created_at', { ascending: true }),
+      ]);
       if (error) return json({ error: error.message }, 400);
+      const slotById = new Map((orderedTeams || []).map((row, idx) => [row.id, idx]));
       return json({
         teams: (data || []).map((t) => ({
           id: t.id,
           name: t.name,
           inviteCode: t.invite_code,
+          slot: slotById.get(t.id) ?? 0,
         })),
       });
     }
 
     if (action === 'createTeam') {
       const accessCode = String(payload.accessCode || '').trim();
-      const expectedCode = Deno.env.get('REGISTRATION_ACCESS_CODE') || 'Avion_2026';
+      const expectedCode = Deno.env.get('REGISTRATION_ACCESS_CODE') || 'Avion@2026';
       if (!accessCode || accessCode !== expectedCode) {
         return json(
           { error: 'Invalid access code. Please contact the organizer for the valid access code.' },
@@ -660,12 +668,19 @@ Deno.serve(async (req) => {
         .single();
       if (error) return json({ error: error.message }, 400);
 
-      const { count } = await adminClient
-        .from('teams')
-        .select('id', { count: 'exact', head: true });
+      const [{ count }, { data: orderedTeams }] = await Promise.all([
+        adminClient.from('teams').select('id', { count: 'exact', head: true }),
+        adminClient.from('teams').select('id').order('created_at', { ascending: true }),
+      ]);
       await adminClient.from('stats').upsert({ id: 1, registered_teams: count ?? 1 });
+      const slotIndex = (orderedTeams || []).findIndex((row) => row.id === team.id);
 
-      return json({ id: team.id, name: team.name, inviteCode: team.invite_code });
+      return json({
+        id: team.id,
+        name: team.name,
+        inviteCode: team.invite_code,
+        slot: slotIndex >= 0 ? slotIndex : Math.max(0, (count ?? 1) - 1),
+      });
     }
 
     if (action === 'joinTeam') {

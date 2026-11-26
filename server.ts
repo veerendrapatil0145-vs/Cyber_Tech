@@ -15,6 +15,7 @@ interface TeamRecord {
   ownerId: string;
   memberIds: string[];
   createdAt: string;
+  slot?: number;
 }
 
 interface CaseScoreRecord {
@@ -119,11 +120,12 @@ interface ArenaDatabase {
   games: GameRecord[];
   announcements: AnnouncementRecord[];
   sessions: InvestigationSessionRecord[];
+  nextTeamSlot?: number;
 }
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || 'ARENA-ADMIN-2026';
-const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion_2026';
+const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion@2026';
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://erfbsolezxmdunjjthgq.supabase.co';
 const SUPABASE_ANON_KEY =
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
@@ -138,6 +140,7 @@ const EMPTY_DB: ArenaDatabase = {
   games: [],
   announcements: [],
   sessions: [],
+  nextTeamSlot: 0,
 };
 
 let dbCache: ArenaDatabase | null = null;
@@ -152,12 +155,19 @@ async function ensureDb(): Promise<ArenaDatabase> {
   try {
     const raw = await fs.readFile(DB_FILE, 'utf8');
     const parsed = JSON.parse(raw) as Partial<ArenaDatabase>;
+    const teams = Array.isArray(parsed.teams) ? parsed.teams : [];
+    const maxSlot = teams.reduce(
+      (max, item, index) => Math.max(max, typeof item.slot === 'number' ? item.slot : index),
+      -1
+    );
     dbCache = {
-      teams: Array.isArray(parsed.teams) ? parsed.teams : [],
+      teams,
       rankings: Array.isArray(parsed.rankings) ? parsed.rankings : [],
       games: Array.isArray(parsed.games) ? parsed.games : [],
       announcements: Array.isArray(parsed.announcements) ? parsed.announcements : [],
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+      nextTeamSlot:
+        typeof parsed.nextTeamSlot === 'number' ? Math.max(parsed.nextTeamSlot, maxSlot + 1) : maxSlot + 1,
     };
   } catch {
     dbCache = structuredClone(EMPTY_DB);
@@ -525,7 +535,15 @@ async function startServer() {
     }
 
     if (action === 'listMyTeams') {
-      const teams = db.teams.filter((team) => team.memberIds.includes(playerId));
+      const sortedIds = [...db.teams]
+        .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        .map((t) => t.id);
+      const teams = db.teams
+        .filter((team) => team.memberIds.includes(playerId))
+        .map((team) => ({
+          ...team,
+          slot: typeof team.slot === 'number' ? team.slot : Math.max(0, sortedIds.indexOf(team.id)),
+        }));
       res.json({ teams });
       return;
     }
@@ -553,7 +571,16 @@ async function startServer() {
 
       const existingMembership = db.teams.find((team) => team.memberIds.includes(playerId));
       if (existingMembership) {
-        res.json(existingMembership);
+        const sortedIds = [...db.teams]
+          .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+          .map((t) => t.id);
+        res.json({
+          ...existingMembership,
+          slot:
+            typeof existingMembership.slot === 'number'
+              ? existingMembership.slot
+              : Math.max(0, sortedIds.indexOf(existingMembership.id)),
+        });
         return;
       }
 
@@ -562,6 +589,10 @@ async function startServer() {
         inviteCode = generateInviteCode(6);
       }
 
+      const assignedSlot =
+        typeof db.nextTeamSlot === 'number' ? db.nextTeamSlot : db.teams.length;
+      db.nextTeamSlot = assignedSlot + 1;
+
       const team: TeamRecord = {
         id: `team_${crypto.randomUUID().slice(0, 8)}`,
         name: rawName,
@@ -569,6 +600,7 @@ async function startServer() {
         ownerId: playerId,
         memberIds: [playerId],
         createdAt: new Date().toISOString(),
+        slot: assignedSlot,
       };
 
       db.teams.push(team);
