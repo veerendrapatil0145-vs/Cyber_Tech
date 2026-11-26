@@ -1114,6 +1114,7 @@ async function startServer() {
             memberCount: team.memberIds.length,
             createdAt: team.createdAt,
           })),
+          rankings: buildAdminFullRankings(db).slice(0, 500),
         });
         return;
       }

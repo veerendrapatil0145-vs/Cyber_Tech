@@ -711,6 +711,14 @@ Deno.serve(async (req) => {
       const teamId = String(payload.teamId || '');
       if (!caseAnswerKeys[caseId]) return json({ error: 'Case file not found.' }, 404);
 
+      const { data: team } = await adminClient
+        .from('teams')
+        .select('id')
+        .eq('id', teamId)
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (!team) return json({ error: 'Team membership required.' }, 403);
+
       const { data: existing } = await adminClient
         .from('sessions')
         .select('*')
@@ -747,6 +755,13 @@ Deno.serve(async (req) => {
     if (action === 'saveInvestigationProgress') {
       const caseId = String(payload.caseId || '');
       const teamId = String(payload.teamId || '');
+      const { data: team } = await adminClient
+        .from('teams')
+        .select('id')
+        .eq('id', teamId)
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (!team) return json({ error: 'Team membership required.' }, 403);
       await adminClient
         .from('sessions')
         .update({
@@ -768,6 +783,13 @@ Deno.serve(async (req) => {
     if (action === 'useInvestigationHint') {
       const caseId = String(payload.caseId || '');
       const teamId = String(payload.teamId || '');
+      const { data: team } = await adminClient
+        .from('teams')
+        .select('id')
+        .eq('id', teamId)
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (!team) return json({ error: 'Team membership required.' }, 403);
       const { data: session } = await adminClient
         .from('sessions')
         .select('*')
@@ -794,8 +816,9 @@ Deno.serve(async (req) => {
         .from('teams')
         .select('*')
         .eq('id', teamId)
-        .single();
-      if (!team) return json({ error: 'Team not found.' }, 404);
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (!team) return json({ error: 'Team membership required.' }, 403);
 
       const { data: session } = await adminClient
         .from('sessions')
@@ -898,7 +921,7 @@ Deno.serve(async (req) => {
         )
       );
 
-      await adminClient.from('rankings').upsert(
+      const { error: rankError } = await adminClient.from('rankings').upsert(
         {
           team_id: team.id,
           team_name: team.name,
@@ -912,6 +935,7 @@ Deno.serve(async (req) => {
         },
         { onConflict: 'team_id' }
       );
+      if (rankError) return json({ error: rankError.message }, 400);
 
       if (session) {
         await adminClient.from('sessions').update({ completed: true }).eq('id', session.id);
@@ -925,6 +949,99 @@ Deno.serve(async (req) => {
         ...caseResult,
         message,
       });
+    }
+
+    if (action === 'syncLocalScores') {
+      const teamId = String(payload.teamId || '');
+      const { data: team } = await adminClient
+        .from('teams')
+        .select('*')
+        .eq('id', teamId)
+        .contains('member_ids', [user.id])
+        .maybeSingle();
+      if (!team) return json({ error: 'Team membership required.' }, 403);
+
+      const incoming =
+        payload.caseScores && typeof payload.caseScores === 'object'
+          ? (payload.caseScores as Record<string, Record<string, unknown>>)
+          : {};
+
+      const { data: existingRank } = await adminClient
+        .from('rankings')
+        .select('*')
+        .eq('team_id', team.id)
+        .maybeSingle();
+
+      const caseScores: Record<string, unknown> = { ...(existingRank?.case_scores || {}) };
+      let changed = false;
+
+      for (const [caseId, item] of Object.entries(incoming)) {
+        if (!caseAnswerKeys[caseId] || !item || typeof item !== 'object') continue;
+        if (Object.hasOwn(caseScores, caseId)) continue;
+        const maxScore = getCaseMaxScoreById(caseId);
+        const safeScore =
+          typeof item.score === 'number' && Number.isFinite(item.score)
+            ? Math.max(0, Math.min(maxScore, Math.round(item.score)))
+            : 0;
+        const safeElapsed =
+          typeof item.elapsedSeconds === 'number' && Number.isFinite(item.elapsedSeconds)
+            ? Math.max(1, Math.min(3600, Math.round(item.elapsedSeconds)))
+            : 60;
+        caseScores[caseId] = {
+          score: safeScore,
+          maxScore,
+          sequenceScore:
+            typeof item.sequenceScore === 'number' ? item.sequenceScore : undefined,
+          summaryScore:
+            typeof item.summaryScore === 'number' ? item.summaryScore : undefined,
+          hintsUsed:
+            typeof item.hintsUsed === 'number' ? Math.max(0, Math.round(item.hintsUsed)) : 0,
+          elapsedSeconds: safeElapsed,
+          submittedAt:
+            typeof item.submittedAt === 'string' ? item.submittedAt : new Date().toISOString(),
+          timelineMatches:
+            typeof item.timelineMatches === 'number' ? item.timelineMatches : 0,
+          totalTimeline:
+            typeof item.totalTimeline === 'number'
+              ? item.totalTimeline
+              : caseAnswerKeys[caseId].correctTimeline.length,
+          explanations: Array.isArray(item.explanations) ? item.explanations : [],
+        };
+        changed = true;
+      }
+
+      if (changed) {
+        const totalScore = Math.round(
+          Object.values(caseScores).reduce(
+            (sum: number, item: unknown) => sum + ((item as { score?: number }).score || 0),
+            0
+          )
+        );
+        const totalElapsed = Math.round(
+          Object.values(caseScores).reduce(
+            (sum: number, item: unknown) =>
+              sum + ((item as { elapsedSeconds?: number }).elapsedSeconds || 0),
+            0
+          )
+        );
+        const { error: rankError } = await adminClient.from('rankings').upsert(
+          {
+            team_id: team.id,
+            team_name: team.name,
+            owner_id: team.owner_id,
+            member_ids: team.member_ids,
+            mode: 'Team',
+            score: totalScore,
+            elapsed_seconds: totalElapsed,
+            case_scores: caseScores,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'team_id' }
+        );
+        if (rankError) return json({ error: rankError.message }, 400);
+      }
+
+      return json({ synced: changed });
     }
 
     if (action === 'joinGame') {
@@ -1025,14 +1142,18 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'adminListTeams') {
-      const { data, error } = await adminClient.from('teams').select('id, name, member_ids');
-      if (error) return json({ error: error.message }, 400);
+      const [teamsRes, rankingsRes] = await Promise.all([
+        adminClient.from('teams').select('id, name, member_ids'),
+        adminClient.from('rankings').select('*').order('score', { ascending: false }).limit(500),
+      ]);
+      if (teamsRes.error) return json({ error: teamsRes.error.message }, 400);
       return json({
-        teams: (data || []).map((t) => ({
+        teams: (teamsRes.data || []).map((t) => ({
           id: t.id,
           name: t.name,
           memberCount: Array.isArray(t.member_ids) ? t.member_ids.length : 0,
         })),
+        rankings: rankingsRes.error ? [] : rankingsRes.data || [],
       });
     }
 

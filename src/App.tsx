@@ -1167,24 +1167,41 @@ export default function App() {
 
   useEffect(() => {
     if (!user || !teamInfo || !supabaseAccessToken) return;
-    const existingLocal = localRankings[teamInfo.id];
-    if (!existingLocal || Object.keys(existingLocal).length === 0) return;
-    const syncKey = `${teamInfo.id}:${Object.keys(existingLocal).sort().join(',')}`;
+    const mergedLocalForTeam = {
+      ...(localRankings.solo || {}),
+      ...(localRankings[teamInfo.id] || {}),
+    };
+    if (Object.keys(mergedLocalForTeam).length === 0) return;
+    const syncKey = `${teamInfo.id}:${Object.keys(mergedLocalForTeam).sort().join(',')}`;
     if (syncedLocalTeamsRef.current.has(syncKey)) return;
     syncedLocalTeamsRef.current.add(syncKey);
-    void callLocalArena<{ synced?: boolean }>('syncLocalScores', {
-      teamId: teamInfo.id,
-      caseScores: existingLocal,
-    })
-      .then((res) => {
-        if (res.synced) {
-          void fetchSharedServerState();
+
+    const syncAllTargets = async () => {
+      let syncedAny = false;
+      const results = await Promise.allSettled([
+        callLocalArena<{ synced?: boolean }>('syncLocalScores', {
+          teamId: teamInfo.id,
+          caseScores: mergedLocalForTeam,
+        }),
+        invoke<{ synced?: boolean }>('syncLocalScores', {
+          teamId: teamInfo.id,
+          caseScores: mergedLocalForTeam,
+        }),
+      ]);
+      for (const res of results) {
+        if (res.status === 'fulfilled' && res.value?.synced) {
+          syncedAny = true;
         }
-      })
-      .catch(() => {
-        syncedLocalTeamsRef.current.delete(syncKey);
-      });
-  }, [user, teamInfo, supabaseAccessToken, localRankings, callLocalArena, fetchSharedServerState]);
+      }
+      if (syncedAny) {
+        await refreshArenaData();
+      }
+    };
+
+    void syncAllTargets().catch(() => {
+      syncedLocalTeamsRef.current.delete(syncKey);
+    });
+  }, [user, teamInfo, supabaseAccessToken, localRankings, callLocalArena, invoke, refreshArenaData]);
 
   useEffect(() => {
     if (!activeCase || result || !hasLiveEvent) return undefined;
@@ -2243,6 +2260,7 @@ export default function App() {
                 registeredCount={registeredCount}
                 games={games}
                 leaderboard={effectiveLeaderboard}
+                onAdminRankings={setLeaderboard}
                 exportResults={exportResults}
                 invoke={invoke}
                 setNotice={setNotice}
@@ -3960,6 +3978,7 @@ function AdminView({
   registeredCount,
   games,
   leaderboard,
+  onAdminRankings,
   exportResults,
   invoke,
   setNotice,
@@ -3976,6 +3995,7 @@ function AdminView({
   registeredCount: number | null;
   games: GameLobby[];
   leaderboard: RankingEntry[];
+  onAdminRankings: (rows: RankingEntry[]) => void;
   exportResults: (entriesOverride?: RankingEntry[]) => void;
   invoke: <T = Record<string, unknown>>(name: string, data?: Record<string, unknown>) => Promise<T>;
   setNotice: (v: string) => void;
@@ -4088,8 +4108,14 @@ function AdminView({
   const loadTeams = useCallback(async () => {
     setTeamsSyncing(true);
     try {
-      const result = await invoke<{ teams?: AdminTeamSummary[] }>('adminListTeams', {});
+      const result = await invoke<{
+        teams?: AdminTeamSummary[];
+        rankings?: Record<string, unknown>[];
+      }>('adminListTeams', {});
       setTeams(result.teams || []);
+      if (Array.isArray(result.rankings)) {
+        onAdminRankings(result.rankings.map(mapRanking));
+      }
       setTeamsError('');
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unable to load registered participants.';
@@ -4098,7 +4124,7 @@ function AdminView({
     } finally {
       setTeamsSyncing(false);
     }
-  }, [invoke, handleAdminError]);
+  }, [invoke, handleAdminError, onAdminRankings]);
 
   const refreshAdminBoard = useCallback(async () => {
     await Promise.all([loadTeams(), refreshArenaData()]);
