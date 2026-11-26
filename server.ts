@@ -210,20 +210,64 @@ function broadcastEvent(event: string, payload: unknown): void {
   }
 }
 
-function buildPublicState(db: ArenaDatabase, isAdmin: boolean, playerId = '') {
-  const sortedRankings = [...db.rankings].sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
+function compareRankingRecords(a: RankingRecord, b: RankingRecord): number {
+  if (b.score !== a.score) return b.score - a.score;
+  const aCases = Object.keys(a.caseScores || {}).length;
+  const bCases = Object.keys(b.caseScores || {}).length;
+  if (bCases !== aCases) return bCases - aCases;
+  if (aCases > 0 && bCases > 0 && a.elapsedSeconds !== b.elapsedSeconds) {
     return a.elapsedSeconds - b.elapsedSeconds;
+  }
+  return a.teamName.localeCompare(b.teamName);
+}
+
+function buildAdminFullRankings(db: ArenaDatabase): RankingRecord[] {
+  const byTeamId = new Map<string, RankingRecord>();
+  for (const entry of db.rankings) {
+    byTeamId.set(entry.teamId, entry);
+  }
+  const merged: RankingRecord[] = db.teams.map((team) => {
+    const existing = byTeamId.get(team.id);
+    if (existing) {
+      return {
+        ...existing,
+        teamName: team.name,
+        memberIds: [...team.memberIds],
+      };
+    }
+    return {
+      id: `rank_${team.id}`,
+      teamId: team.id,
+      teamName: team.name,
+      ownerId: team.ownerId,
+      memberIds: [...team.memberIds],
+      mode: 'Team',
+      score: 0,
+      elapsedSeconds: 0,
+      caseScores: {},
+      updatedAt: team.createdAt,
+    };
   });
+  const activeTeamIds = new Set(db.teams.map((team) => team.id));
+  for (const entry of db.rankings) {
+    if (!activeTeamIds.has(entry.teamId)) {
+      merged.push(entry);
+    }
+  }
+  return merged.sort(compareRankingRecords);
+}
+
+function buildPublicState(db: ArenaDatabase, isAdmin: boolean, playerId = '') {
+  const sortedScoredRankings = [...db.rankings].sort(compareRankingRecords);
   const playerRankIndex = playerId
-    ? sortedRankings.findIndex(
+    ? sortedScoredRankings.findIndex(
         (entry) => entry.ownerId === playerId || entry.memberIds.includes(playerId)
       )
     : -1;
   const visibleRankings = isAdmin
-    ? sortedRankings.slice(0, 500)
+    ? buildAdminFullRankings(db).slice(0, 500)
     : playerId
-    ? sortedRankings.filter(
+    ? sortedScoredRankings.filter(
         (entry) => entry.ownerId === playerId || entry.memberIds.includes(playerId)
       )
     : undefined;
@@ -635,10 +679,7 @@ async function startServer() {
       await persistDb(db);
       broadcastEvent('state', buildPublicState(db, false));
 
-      const sorted = [...db.rankings].sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        return a.elapsedSeconds - b.elapsedSeconds;
-      });
+      const sorted = [...db.rankings].sort(compareRankingRecords);
       const rank = sorted.findIndex((entry) => entry.teamId === team.id) + 1;
 
       res.json({

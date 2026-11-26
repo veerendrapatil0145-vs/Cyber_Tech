@@ -1634,8 +1634,8 @@ export default function App() {
     }
   };
 
-  const exportResults = () => {
-    const teamList = effectiveLeaderboard.filter((item) => item.mode === 'Team');
+  const exportResults = (entriesOverride?: RankingEntry[]) => {
+    const teamList = (entriesOverride || effectiveLeaderboard).filter((item) => item.mode === 'Team');
     const summaryRows = teamList.map((item, index) => {
       const secs = item.elapsedSeconds || 0;
       const mins = Math.floor(secs / 60);
@@ -1974,12 +1974,10 @@ export default function App() {
                     cases={cases}
                     games={games}
                     announcements={announcements}
-                    leaderboard={effectiveLeaderboard}
                     registeredCount={registeredCount}
                     hasLiveEvent={hasLiveEvent}
                     configuredGameMinutes={configuredGameMinutes}
                     completedCount={completed.length}
-                    admin={admin}
                     setPage={goTo}
                   />
                 )}
@@ -2187,26 +2185,21 @@ function HomeView({
   cases: caseList,
   games,
   announcements,
-  leaderboard,
   registeredCount,
   hasLiveEvent,
   configuredGameMinutes,
   completedCount,
-  admin,
   setPage,
 }: {
   cases: InvestigationCase[];
   games: GameLobby[];
   announcements: AnnouncementItem[];
-  leaderboard: RankingEntry[];
   registeredCount: number | null;
   hasLiveEvent: boolean;
   configuredGameMinutes: number;
   completedCount: number;
-  admin: boolean;
   setPage: (p: PageName) => void;
 }) {
-  const top = leaderboard.filter((score) => score.mode === 'Team').slice(0, 3);
   const liveGamesCount = games.filter((game) => game.status === 'live').length;
   const [rulesModalOpen, setRulesModalOpen] = useState(false);
 
@@ -2311,11 +2304,11 @@ function HomeView({
         </div>
         <div className="stat-block backdrop-blur-md">
           <span className="stat-icon">
-            {admin ? <Trophy size={17} /> : <Check size={17} />}
+            <Check size={17} />
           </span>
           <div>
-            <strong>{admin ? (top[0]?.score ?? '—') : completedCount}</strong>
-            <small>{admin ? 'TOP SCORE' : 'CASES SOLVED'}</small>
+            <strong>{completedCount}</strong>
+            <small>CASES SOLVED</small>
           </div>
         </div>
         <div className="stat-block backdrop-blur-md">
@@ -3765,7 +3758,7 @@ function AdminView({
   configuredGameMinutes: number;
   games: GameLobby[];
   leaderboard: RankingEntry[];
-  exportResults: () => void;
+  exportResults: (entriesOverride?: RankingEntry[]) => void;
   invoke: <T = Record<string, unknown>>(name: string, data?: Record<string, unknown>) => Promise<T>;
   setNotice: (v: string) => void;
   unlockAdmin: (passcode: string) => Promise<void>;
@@ -3785,16 +3778,60 @@ function AdminView({
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
   const [leaderSearch, setLeaderSearch] = useState('');
 
+  const allParticipantLeaderboard = useMemo(() => {
+    const merged: RankingEntry[] = leaderboard
+      .filter((entry) => entry.mode === 'Team')
+      .map((entry) => ({
+        ...entry,
+        caseScores: { ...(entry.caseScores || {}) },
+      }));
+
+    const seenTeamIds = new Set(merged.map((entry) => entry.teamId).filter(Boolean));
+    const seenTeamNames = new Set(
+      merged.map((entry) => (entry.teamName || '').trim().toLowerCase()).filter(Boolean)
+    );
+
+    for (const team of teams) {
+      const normalizedName = team.name.trim().toLowerCase();
+      if (seenTeamIds.has(team.id) || (normalizedName && seenTeamNames.has(normalizedName))) {
+        continue;
+      }
+      merged.push({
+        id: `team_${team.id}`,
+        teamId: team.id,
+        teamName: team.name,
+        mode: 'Team',
+        score: 0,
+        elapsedSeconds: 0,
+        caseScores: {},
+      });
+    }
+
+    merged.sort((a, b) => {
+      if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+      const aCases = Object.keys(a.caseScores || {}).length;
+      const bCases = Object.keys(b.caseScores || {}).length;
+      if (bCases !== aCases) return bCases - aCases;
+      if (aCases > 0 && bCases > 0 && (a.elapsedSeconds || 0) !== (b.elapsedSeconds || 0)) {
+        return (a.elapsedSeconds || 0) - (b.elapsedSeconds || 0);
+      }
+      return (a.teamName || '').localeCompare(b.teamName || '');
+    });
+
+    return merged.map((entry, idx) => ({
+      ...entry,
+      rank: idx + 1,
+    }));
+  }, [leaderboard, teams]);
+
   const filteredLeaderboard = useMemo(
     () =>
-      leaderboard.filter(
-        (score) =>
-          score.mode === 'Team' &&
-          `${score.teamName || ''}`.toLowerCase().includes(leaderSearch.toLowerCase())
+      allParticipantLeaderboard.filter((score) =>
+        `${score.teamName || ''}`.toLowerCase().includes(leaderSearch.toLowerCase())
       ),
-    [leaderboard, leaderSearch]
+    [allParticipantLeaderboard, leaderSearch]
   );
-  const podium = filteredLeaderboard.slice(0, 3);
+  const podium = allParticipantLeaderboard.slice(0, 3);
 
   useEffect(() => {
     setDurationInput(String(configuredGameMinutes));
@@ -4007,7 +4044,10 @@ function AdminView({
         description="Manage live game access, total game time, teams, and announcements. Case answers and score validation remain server-controlled."
         action={
           <div className="admin-header-actions">
-            <button className="button button-outline" onClick={exportResults}>
+            <button
+              className="button button-outline"
+              onClick={() => exportResults(allParticipantLeaderboard)}
+            >
               <ArrowDown size={15} />
               <span>Export Excel (.xlsx)</span>
             </button>
@@ -4147,8 +4187,8 @@ function AdminView({
           accent="lime"
         />
         <Metric
-          label="RANKED TEAMS"
-          value={leaderboard.filter((entry) => entry.mode === 'Team').length}
+          label="LEADERBOARD ENTRIES"
+          value={allParticipantLeaderboard.length}
           icon={Check}
           accent="orange"
         />
@@ -4164,13 +4204,17 @@ function AdminView({
             <input
               value={leaderSearch}
               onChange={(event) => setLeaderSearch(event.target.value)}
-              placeholder="Filter teams on leaderboard"
-              aria-label="Filter teams on leaderboard"
+              placeholder="Filter participants on leaderboard"
+              aria-label="Filter participants on leaderboard"
             />
           </label>
           <div className="admin-leaderboard-actions">
             <span className="live-updating">LIVE UPDATING</span>
-            <button type="button" className="button button-outline" onClick={exportResults}>
+            <button
+              type="button"
+              className="button button-outline"
+              onClick={() => exportResults(allParticipantLeaderboard)}
+            >
               <ArrowDown size={15} />
               <span>Export Excel (.xlsx)</span>
             </button>
@@ -4180,8 +4224,7 @@ function AdminView({
         {podium.length > 0 && (
           <div className="podium-grid">
             {[podium[1], podium[0], podium[2]].filter(Boolean).map((team) => {
-              const actualIndex = filteredLeaderboard.findIndex((entry) => entry.id === team.id);
-              const rank = actualIndex + 1;
+              const rank = team.rank;
               return (
                 <div className={`podium-card podium-${rank}`} key={team.id}>
                   <span className="podium-crown">
@@ -4208,15 +4251,17 @@ function AdminView({
         <div className="leaderboard-table-wrap backdrop-blur-md">
           <div className="table-heading">
             <div>
-              <span className="eyebrow">ADMINISTRATOR ONLY · LIVE STANDINGS</span>
+              <span className="eyebrow">ADMIN CONSOLE ONLY · EVERY PARTICIPANT&apos;S RANK &amp; SCORE</span>
               <h2 id="admin-leaderboard-heading">
-                Leaderboard <small>{filteredLeaderboard.length} entries</small>
+                Leaderboard <small>{filteredLeaderboard.length} of {allParticipantLeaderboard.length} participants</small>
               </h2>
+              <p className="muted-copy">
+                Note: All participants&apos; ranks and scores are shown here and visible only in the Admin Console.
+              </p>
             </div>
             <span className="current-rank">
               <Trophy size={15} />
-              TOTAL RANKED{' '}
-              <b>{leaderboard.filter((entry) => entry.mode === 'Team').length}</b>
+              TOTAL PARTICIPANTS <b>{allParticipantLeaderboard.length}</b>
             </span>
           </div>
 
@@ -4226,20 +4271,20 @@ function AdminView({
                 <thead>
                   <tr>
                     <th>RANK</th>
-                    <th>TEAM</th>
+                    <th>PARTICIPANT / TEAM</th>
                     <th>CASES</th>
                     <th>SCORE</th>
                     <th>TIME</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredLeaderboard.map((team, index) => {
+                  {filteredLeaderboard.map((team) => {
                     const solvedCount = Object.keys(team.caseScores || {}).length;
                     return (
                       <tr key={team.id}>
                         <td>
-                          <span className={`rank-number ${index < 3 ? 'top-rank' : ''}`}>
-                            {String(index + 1).padStart(2, '0')}
+                          <span className={`rank-number ${team.rank <= 3 ? 'top-rank' : ''}`}>
+                            {String(team.rank).padStart(2, '0')}
                           </span>
                         </td>
                         <td>
@@ -4271,8 +4316,16 @@ function AdminView({
           ) : (
             <EmptyState
               icon={Trophy}
-              title="No verified team scores yet"
-              copy="Scores appear here live as participants submit case verdicts."
+              title={
+                allParticipantLeaderboard.length
+                  ? 'No matching participants'
+                  : 'No registered participants yet'
+              }
+              copy={
+                allParticipantLeaderboard.length
+                  ? 'Try clearing or changing your leaderboard search filter.'
+                  : 'Every registered participant rank and score will appear here automatically.'
+              }
             />
           )}
         </div>
