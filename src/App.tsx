@@ -1635,7 +1635,9 @@ export default function App() {
   };
 
   const exportResults = (entriesOverride?: RankingEntry[]) => {
-    const teamList = (entriesOverride || effectiveLeaderboard).filter((item) => item.mode === 'Team');
+    const teamList = entriesOverride
+      ? entriesOverride
+      : effectiveLeaderboard.filter((item) => !item.mode || item.mode === 'Team');
     const summaryRows = teamList.map((item, index) => {
       const secs = item.elapsedSeconds || 0;
       const mins = Math.floor(secs / 60);
@@ -2025,6 +2027,7 @@ export default function App() {
                 isGamePaused={isGamePaused}
                 isGameEnded={isGameEnded}
                 configuredGameMinutes={configuredGameMinutes}
+                registeredCount={registeredCount}
                 games={games}
                 leaderboard={effectiveLeaderboard}
                 exportResults={exportResults}
@@ -3741,6 +3744,7 @@ function AdminView({
   isGamePaused,
   isGameEnded,
   configuredGameMinutes,
+  registeredCount,
   games,
   leaderboard,
   exportResults,
@@ -3756,6 +3760,7 @@ function AdminView({
   isGamePaused: boolean;
   isGameEnded: boolean;
   configuredGameMinutes: number;
+  registeredCount: number | null;
   games: GameLobby[];
   leaderboard: RankingEntry[];
   exportResults: (entriesOverride?: RankingEntry[]) => void;
@@ -3776,17 +3781,22 @@ function AdminView({
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [unlockError, setUnlockError] = useState('');
   const [teams, setTeams] = useState<AdminTeamSummary[]>([]);
+  const [teamsError, setTeamsError] = useState('');
+  const [teamsSyncing, setTeamsSyncing] = useState(false);
   const [leaderSearch, setLeaderSearch] = useState('');
 
   const allParticipantLeaderboard = useMemo(() => {
     const merged: RankingEntry[] = leaderboard
-      .filter((entry) => entry.mode === 'Team')
+      .filter((entry) => Boolean(entry.teamName || entry.teamId))
       .map((entry) => ({
         ...entry,
+        mode: entry.mode || 'Team',
         caseScores: { ...(entry.caseScores || {}) },
       }));
 
-    const seenTeamIds = new Set(merged.map((entry) => entry.teamId).filter(Boolean));
+    const seenTeamIds = new Set(
+      merged.map((entry) => entry.teamId || entry.id).filter(Boolean)
+    );
     const seenTeamNames = new Set(
       merged.map((entry) => (entry.teamName || '').trim().toLowerCase()).filter(Boolean)
     );
@@ -3863,19 +3873,32 @@ function AdminView({
   );
 
   const loadTeams = useCallback(async () => {
+    setTeamsSyncing(true);
     try {
       const result = await invoke<{ teams?: AdminTeamSummary[] }>('adminListTeams', {});
       setTeams(result.teams || []);
+      setTeamsError('');
     } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unable to load registered participants.';
+      setTeamsError(msg);
       handleAdminError(error, 'Unable to load teams.');
+    } finally {
+      setTeamsSyncing(false);
     }
   }, [invoke, handleAdminError]);
 
+  const refreshAdminBoard = useCallback(async () => {
+    await Promise.all([loadTeams(), refreshArenaData()]);
+  }, [loadTeams, refreshArenaData]);
+
   useEffect(() => {
-    if (!admin) return;
-    void loadTeams();
-    void refreshArenaData();
-  }, [admin, loadTeams, refreshArenaData]);
+    if (!admin) return undefined;
+    void refreshAdminBoard();
+    const timer = window.setInterval(() => {
+      void loadTeams();
+    }, 6000);
+    return () => window.clearInterval(timer);
+  }, [admin, registeredCount, leaderboard.length, loadTeams, refreshAdminBoard]);
 
   const handleUnlock = async (event: FormEvent) => {
     event.preventDefault();
@@ -4179,7 +4202,12 @@ function AdminView({
       </div>
 
       <div className="admin-metrics">
-        <Metric label="REGISTERED TEAMS" value={teams.length || '—'} icon={Users} accent="cyan" />
+        <Metric
+          label="REGISTERED TEAMS"
+          value={Math.max(teams.length, registeredCount ?? 0) || '—'}
+          icon={Users}
+          accent="cyan"
+        />
         <Metric
           label="ARENA STATUS"
           value={hasLiveEvent ? 'LIVE' : isGameEnded ? 'ENDED' : isGamePaused ? 'PAUSED' : 'LOCKED'}
@@ -4209,7 +4237,16 @@ function AdminView({
             />
           </label>
           <div className="admin-leaderboard-actions">
-            <span className="live-updating">LIVE UPDATING</span>
+            <span className="live-updating">{teamsSyncing ? 'SYNCING...' : 'LIVE UPDATING'}</span>
+            <button
+              type="button"
+              className="button button-outline"
+              disabled={teamsSyncing}
+              onClick={() => void refreshAdminBoard()}
+            >
+              <Radio size={15} />
+              <span>Refresh</span>
+            </button>
             <button
               type="button"
               className="button button-outline"
@@ -4220,6 +4257,13 @@ function AdminView({
             </button>
           </div>
         </div>
+
+        {teamsError && (
+          <p className="auth-error">
+            <ShieldAlert size={14} />
+            <span>{teamsError}</span>
+          </p>
+        )}
 
         {podium.length > 0 && (
           <div className="podium-grid">
@@ -4338,7 +4382,7 @@ function AdminView({
               <div className="eyebrow">TEAM ROSTER</div>
               <h2>Registered teams</h2>
             </div>
-            <button type="button" className="text-link" onClick={loadTeams}>
+            <button type="button" className="text-link" onClick={() => void refreshAdminBoard()}>
               Refresh teams <ArrowRight size={14} />
             </button>
           </div>

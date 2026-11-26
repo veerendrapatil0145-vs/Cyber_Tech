@@ -189,6 +189,24 @@ function getPlayerId(req: Request): string {
   return '';
 }
 
+function signLocalAdminToken(): string {
+  const exp = Date.now() + 24 * 60 * 60 * 1000;
+  const payload = String(exp);
+  const sig = crypto.createHmac('sha256', ADMIN_PASSCODE).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+function verifyLocalAdminToken(token: string): boolean {
+  if (!token) return false;
+  if (activeAdminTokens.has(token)) return true;
+  const [payload, sigHex] = token.split('.');
+  if (!payload || !sigHex) return false;
+  const exp = Number(payload);
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const expectedHex = crypto.createHmac('sha256', ADMIN_PASSCODE).update(payload).digest('hex');
+  return expectedHex === sigHex;
+}
+
 function isAdminRequest(req: Request): boolean {
   const headerToken = req.header('x-arena-admin')?.trim() || '';
   const bodyToken =
@@ -196,7 +214,7 @@ function isAdminRequest(req: Request): boolean {
       ? (req.body as { adminToken: string }).adminToken.trim()
       : '';
   const token = headerToken || bodyToken;
-  return Boolean(token && activeAdminTokens.has(token));
+  return verifyLocalAdminToken(token);
 }
 
 function broadcastEvent(event: string, payload: unknown): void {
@@ -385,7 +403,7 @@ async function startServer() {
         res.status(403).json({ error: 'Invalid organizer passcode.' });
         return;
       }
-      const token = crypto.randomBytes(24).toString('hex');
+      const token = signLocalAdminToken();
       activeAdminTokens.add(token);
       res.json({ adminToken: token, isAdmin: true });
       return;
