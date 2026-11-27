@@ -209,6 +209,16 @@ function clampGameDurationMinutes(value: unknown, fallback = DEFAULT_GAME_DURATI
   return Math.max(1, Math.min(300, Math.round(num)));
 }
 
+function formatGameDurationLabel(minutes: number): string {
+  if (minutes === 60) return '60 min (1 hr)';
+  if (minutes === 120) return '120 min (2 hrs)';
+  if (minutes === 180) return '180 min (3 hrs)';
+  if (minutes % 60 === 0 && minutes > 60) {
+    return `${minutes} min (${minutes / 60} hrs)`;
+  }
+  return `${minutes} min`;
+}
+
 function parseDurationMinutesFromGame(game?: Pick<GameLobby, 'durationMinutes' | 'name'> | null): number | null {
   if (!game) return null;
   if (typeof game.durationMinutes === 'number' && Number.isFinite(game.durationMinutes) && game.durationMinutes >= 1) {
@@ -308,6 +318,12 @@ function computeClockElapsed(clock: GameClockState, now = Date.now()): number {
 
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
+  if (safe >= 3600) {
+    const hrs = Math.floor(safe / 3600);
+    const mins = Math.floor((safe % 3600) / 60);
+    const secs = safe % 60;
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
 }
 
@@ -812,8 +828,6 @@ export default function App() {
   const caseFallbackRef = useRef(false);
   const syncedLocalTeamsRef = useRef<Set<string>>(new Set());
   const submittingLockRef = useRef(false);
-  const autoClosedCaseKeyRef = useRef<string | null>(null);
-  const finalizeSubmissionRef = useRef<(isAutoExpired?: boolean) => Promise<void>>(async () => {});
   const mainRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState('');
   const [difficultyFilter, setDifficultyFilter] = useState<CaseDifficulty>(
@@ -1451,7 +1465,6 @@ export default function App() {
       }
     }
     localStorage.removeItem('arena-progress');
-    autoClosedCaseKeyRef.current = null;
     setElapsed(0);
     setGameClock(EMPTY_GAME_CLOCK);
     setGameElapsed(0);
@@ -1807,8 +1820,6 @@ export default function App() {
     parseDurationMinutesFromGame(activeOrLatestGame) ?? DEFAULT_GAME_DURATION_MINUTES;
   const totalGameDurationSeconds = configuredGameMinutes * 60;
 
-  const secondsRemaining = Math.max(0, (activeCase?.duration || 0) * 60 - elapsed);
-  const timer = formatClock(secondsRemaining);
   const gameSecondsRemaining = gameClock.started
     ? Math.max(0, totalGameDurationSeconds - gameElapsed)
     : totalGameDurationSeconds;
@@ -2132,7 +2143,6 @@ export default function App() {
       setGameElapsed(0);
     }
 
-    autoClosedCaseKeyRef.current = null;
     const localProgress = stored<{
       caseId?: string;
       report?: string;
@@ -2347,7 +2357,7 @@ export default function App() {
     });
   };
 
-  const finalizeSubmission = async (isAutoExpired = false) => {
+  const finalizeSubmission = async () => {
     if (submittingLockRef.current) return;
     if (!teamInfo || !activeCase) {
       setNotice('Register a team before submitting a verdict.');
@@ -2363,7 +2373,7 @@ export default function App() {
         ...scorePayload,
         submittedSummary: report.trim() || scorePayload.submittedSummary || '',
       };
-      playSignal(muted, isAutoExpired ? 420 : 760);
+      playSignal(muted, 760);
       const nextCompleted = [...new Set([...completed, targetCase.id])];
       localStorage.setItem('arena-completed', JSON.stringify(nextCompleted));
       localStorage.removeItem('arena-progress');
@@ -2384,9 +2394,7 @@ export default function App() {
       void fetchSharedServerState();
       void refreshArenaData();
       setNotice(
-        isAutoExpired
-          ? `Time expired (${targetCase.duration}:00) for "${targetCase.title}". Case closed automatically — review your points and answer summary below.`
-          : `Verdict submitted for "${targetCase.title}". Review your points and answer summary below.`
+        `Verdict submitted for "${targetCase.title}". Review your points and answer summary below.`
       );
     };
 
@@ -2426,7 +2434,7 @@ export default function App() {
       finishWithResult(storedScore, false);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Submission failed.';
-      if (isMissingRemoteCaseError(msg) || isAutoExpired) {
+      if (isMissingRemoteCaseError(msg)) {
         try {
           const serverResponse = await callLocalArena<CaseScore>('submitInvestigation', submitPayload);
           serverCaseModeRef.current = true;
@@ -2460,29 +2468,9 @@ export default function App() {
     }
   };
 
-  finalizeSubmissionRef.current = finalizeSubmission;
-
-  useEffect(() => {
-    if (
-      page !== 'Investigation' ||
-      !activeCase ||
-      result ||
-      !sessionReady ||
-      !teamInfo ||
-      !hasLiveEvent
-    ) {
-      return;
-    }
-    if (elapsed < activeCase.duration * 60) return;
-    const lockKey = `${teamInfo.id}:${activeCase.id}`;
-    if (autoClosedCaseKeyRef.current === lockKey) return;
-    autoClosedCaseKeyRef.current = lockKey;
-    void finalizeSubmissionRef.current(true);
-  }, [page, activeCase, result, sessionReady, teamInfo, elapsed, hasLiveEvent]);
-
   const submitCase = async (event: FormEvent) => {
     event.preventDefault();
-    await finalizeSubmission(false);
+    await finalizeSubmission();
   };
 
   const createTeam = async (event: FormEvent) => {
@@ -2953,8 +2941,6 @@ export default function App() {
                 hintCount={hintCount}
                 hintBusy={hintBusy}
                 requestHint={requestHint}
-                timer={timer}
-                caseExpired={secondsRemaining === 0}
                 gameTimer={gameTimer}
                 configuredGameMinutes={configuredGameMinutes}
                 gameExpired={gameSecondsRemaining === 0}
@@ -3258,7 +3244,7 @@ function HomeView({
               <b>{caseList.length}</b> forensic cases
             </span>
             <span>
-              <b>5 min</b> per case · <b>{configuredGameMinutes} min</b> game
+              <b>{formatGameDurationLabel(configuredGameMinutes)}</b> total game
             </span>
             <span>
               <b>Easy · Medium · Hard</b> tiers
@@ -3399,7 +3385,7 @@ function HomeView({
                 Multiple culprit names reduce marks; max 2 hints per case (<b>-5 pts</b> each).
               </li>
               <li>
-                <b>5 min</b> per case · <b>{configuredGameMinutes} min</b> total arena time.
+                No per-case timer · <b>{formatGameDurationLabel(configuredGameMinutes)}</b> total arena time.
               </li>
             </ul>
           </article>
@@ -3492,7 +3478,7 @@ function HomeView({
                   <li>
                     Every unlocked hint deducts <b className="text-amber-600">-5 PTS</b> from that case&apos;s final score.
                   </li>
-                  <li>Each case has a 5-minute clock; the arena total clock is {configuredGameMinutes} minutes.</li>
+                  <li>No per-case timer; the arena total clock is {formatGameDurationLabel(configuredGameMinutes)}.</li>
                 </ul>
               </div>
 
@@ -4056,10 +4042,6 @@ function CaseTile({
 
       <div className="case-card-bottom">
         <span>
-          <Clock3 size={14} />
-          {gameCase.duration} MIN
-        </span>
-        <span>
           <FileText size={14} />
           {gameCase.evidence.length} EVIDENCE
         </span>
@@ -4097,8 +4079,6 @@ function InvestigationView({
   hintCount,
   hintBusy,
   requestHint,
-  timer,
-  caseExpired,
   gameTimer,
   configuredGameMinutes,
   gameExpired,
@@ -4122,8 +4102,6 @@ function InvestigationView({
   hintCount: number;
   hintBusy: boolean;
   requestHint: () => void;
-  timer: string;
-  caseExpired: boolean;
   gameTimer: string;
   configuredGameMinutes: number;
   gameExpired: boolean;
@@ -4186,37 +4164,6 @@ function InvestigationView({
             : `CASE IN PROGRESS · ${activeCase.difficulty.toUpperCase()}`}
         </div>
         <div className="case-timers-group">
-          <div
-            className={`case-timer ${
-              !hasLiveEvent && !result
-                ? isGameEnded
-                  ? 'is-expired'
-                  : 'is-paused'
-                : caseExpired && !result
-                ? 'is-expired'
-                : ''
-            }`}
-          >
-            {!hasLiveEvent && !result ? (
-              isGameEnded ? (
-                <Square size={14} />
-              ) : (
-                <Pause size={15} />
-              )
-            ) : (
-              <Clock3 size={15} />
-            )}
-            <strong>{timer}</strong>
-            <small>
-              {!hasLiveEvent && !result
-                ? isGameEnded
-                  ? 'GAME ENDED'
-                  : 'CASE PAUSED'
-                : caseExpired && !result
-                ? 'CASE TIME UP'
-                : 'CASE · 5 MIN'}
-            </small>
-          </div>
           <div
             className={`case-timer ${
               !hasLiveEvent && !result
@@ -4302,7 +4249,7 @@ function InvestigationView({
               <p>
                 {isGameEnded
                   ? 'The administrator has ended this Cyber Mystery Arena session. Submissions are now closed.'
-                  : 'Case files are hidden and both timers are frozen while the game is paused. Your collected clues and draft report are saved and will resume once the admin restarts the live session.'}
+                  : 'Case files are hidden and the game timer is frozen while the game is paused. Your collected clues and draft report are saved and will resume once the admin restarts the live session.'}
               </p>
               <div className="arena-gate-actions">
                 <button
@@ -4559,8 +4506,8 @@ function InvestigationView({
                   <strong>{activeCase.difficulty.toUpperCase()} · {caseMaxScore} PTS</strong>
                 </div>
                 <div>
-                  <span>CASE / GAME LIMIT</span>
-                  <strong>{activeCase.duration} MIN / {configuredGameMinutes} MIN</strong>
+                  <span>ARENA TIME LIMIT</span>
+                  <strong>{formatGameDurationLabel(configuredGameMinutes).toUpperCase()}</strong>
                 </div>
                 <div>
                   <span>SCORING SPLIT</span>
@@ -5090,7 +5037,7 @@ function AdminView({
   };
 
   const parsedDurationInput = clampGameDurationMinutes(durationInput, configuredGameMinutes);
-  const durationPresets = [15, 30, 45, 60, 90];
+  const durationPresets = [15, 30, 45, 60, 90, 120, 180];
 
   const publishAnnouncement = async (event: FormEvent) => {
     event.preventDefault();
@@ -5180,16 +5127,16 @@ function AdminView({
           </div>
           <h2>
             {hasLiveEvent
-              ? `All 30 case files are visible (${configuredGameMinutes} min game)`
+              ? `All 30 case files are visible (${formatGameDurationLabel(configuredGameMinutes)} game)`
               : isGameEnded
               ? 'Game ended — standings finalized'
               : isGamePaused
               ? `Game paused — cases hidden & timers stopped (${parsedDurationInput}m)`
-              : `Set total game time (${parsedDurationInput} min) and start`}
+              : `Set total game time (${formatGameDurationLabel(parsedDurationInput)}) and start`}
           </h2>
           <p>
             {hasLiveEvent
-              ? `Participants have ${configuredGameMinutes} minutes total (5 min per case). You can adjust total time below anytime.`
+              ? `Participants have ${formatGameDurationLabel(configuredGameMinutes)} total with no per-case timer. You can adjust total time below anytime.`
               : isGameEnded
               ? 'All case files are closed for this event. Export results or start a new game below.'
               : isGamePaused
@@ -5221,7 +5168,7 @@ function AdminView({
                   className={`admin-preset-btn ${parsedDurationInput === mins ? 'is-active' : ''}`}
                   onClick={() => setDurationInput(String(mins))}
                 >
-                  {mins}m
+                  {mins === 120 ? '2h (120m)' : mins === 180 ? '3h (180m)' : `${mins}m`}
                 </button>
               ))}
             </div>

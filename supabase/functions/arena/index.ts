@@ -1084,7 +1084,7 @@ Deno.serve(async (req) => {
             : 0;
         const safeElapsed =
           typeof item.elapsedSeconds === 'number' && Number.isFinite(item.elapsedSeconds)
-            ? Math.max(1, Math.min(3600, Math.round(item.elapsedSeconds)))
+            ? Math.max(1, Math.min(10800, Math.round(item.elapsedSeconds)))
             : 60;
         caseScores[caseId] = {
           score: safeScore,
