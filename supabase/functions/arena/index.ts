@@ -644,7 +644,7 @@ Deno.serve(async (req) => {
 
     if (action === 'createTeam') {
       const accessCode = String(payload.accessCode || '').trim();
-      const expectedCode = Deno.env.get('REGISTRATION_ACCESS_CODE') || 'Avion@2026';
+      const expectedCode = Deno.env.get('REGISTRATION_ACCESS_CODE') || 'Avion_2026';
       if (!accessCode || accessCode !== expectedCode) {
         return json(
           { error: 'Invalid access code. Please contact the organizer for the valid access code.' },

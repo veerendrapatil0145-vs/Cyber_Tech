@@ -1861,7 +1861,7 @@ export default function App() {
   const createTeam = async (event: FormEvent) => {
     event.preventDefault();
     const trimmedCode = accessCode.trim();
-    if (!trimmedCode || trimmedCode !== 'Avion@2026') {
+    if (!trimmedCode || trimmedCode !== 'Avion_2026') {
       setTeamEntryError('Invalid access code. Please contact the organizer for the valid access code.');
       return;
     }

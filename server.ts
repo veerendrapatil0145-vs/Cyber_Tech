@@ -125,7 +125,7 @@ interface ArenaDatabase {
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || 'ARENA-ADMIN-2026';
-const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion@2026';
+const REGISTRATION_ACCESS_CODE = process.env.REGISTRATION_ACCESS_CODE || 'Avion_2026';
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://erfbsolezxmdunjjthgq.supabase.co';
 const SUPABASE_ANON_KEY =
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
