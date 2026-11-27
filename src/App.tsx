@@ -468,8 +468,297 @@ function formatAnnouncementDate(createdAt?: string | { toDate?: () => Date }): s
   return createdAt.toDate?.().toLocaleDateString() || 'ARENA NOTICE';
 }
 
+type CaseTab = 'Evidence' | 'Suspects';
+
+interface PersistedNavState {
+  activeView: PageName;
+  selectedCaseId: string | null;
+  activeTab: CaseTab;
+  difficultyFilter?: CaseDifficulty;
+}
+
+interface CachedTeamRecord {
+  userId: string;
+  team: TeamInfo;
+}
+
+interface CachedSharedArenaState {
+  games: GameLobby[];
+  announcements: AnnouncementItem[];
+  registeredCount: number | null;
+  leaderboard: RankingEntry[];
+}
+
+const NAV_STORAGE_KEY = 'arena-nav-state';
+const TEAM_CACHE_STORAGE_KEY = 'arena-team-cache';
+const ARENA_SHARED_CACHE_KEY = 'arena-shared-cache';
+const SESSION_HYDRATED_KEY = 'arena-session-hydrated';
+
+function readCachedTeamRecord(): CachedTeamRecord | null {
+  if (typeof window === 'undefined') return null;
+  const cached = stored<CachedTeamRecord | null>(TEAM_CACHE_STORAGE_KEY, null);
+  if (cached?.team?.id && cached?.team?.name && typeof cached.userId === 'string') {
+    return cached;
+  }
+  return null;
+}
+
+function saveCachedTeamRecord(userId: string, team: TeamInfo | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (team && userId) {
+      localStorage.setItem(TEAM_CACHE_STORAGE_KEY, JSON.stringify({ userId, team }));
+    } else {
+      localStorage.removeItem(TEAM_CACHE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+function readCachedSharedArenaState(): CachedSharedArenaState {
+  if (typeof window === 'undefined') {
+    return { games: [], announcements: [], registeredCount: null, leaderboard: [] };
+  }
+  const cached = stored<Partial<CachedSharedArenaState> | null>(ARENA_SHARED_CACHE_KEY, null);
+  return {
+    games: Array.isArray(cached?.games) ? cached.games : [],
+    announcements: Array.isArray(cached?.announcements) ? cached.announcements : [],
+    registeredCount: typeof cached?.registeredCount === 'number' ? cached.registeredCount : null,
+    leaderboard: Array.isArray(cached?.leaderboard) ? cached.leaderboard : [],
+  };
+}
+
+function writeCachedSharedArenaState(next: CachedSharedArenaState): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(ARENA_SHARED_CACHE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+function parseHashToRoute(rawHash: string): { page: PageName; caseId: string | null } | null {
+  const cleaned = rawHash.replace(/^#/, '').split('?')[0].replace(/\/+$/, '') || '';
+  if (!cleaned || cleaned === '/') return null;
+  const normalized = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+  if (normalized === '/home') return { page: 'Home', caseId: null };
+  if (normalized === '/dashboard') return { page: 'Dashboard', caseId: null };
+  if (normalized === '/lobby' || normalized === '/cases') {
+    return { page: 'Play Investigation', caseId: null };
+  }
+  if (normalized === '/history') return { page: 'My History', caseId: null };
+  if (normalized === '/admin' || normalized === '/leaderboard') {
+    return { page: 'Admin', caseId: null };
+  }
+  if (normalized.startsWith('/case/')) {
+    const rawId = decodeURIComponent(normalized.slice('/case/'.length)).trim();
+    if (rawId && getCachedCaseById(rawId)) {
+      return { page: 'Investigation', caseId: rawId };
+    }
+    return { page: 'Play Investigation', caseId: null };
+  }
+  return null;
+}
+
+function hashForRoute(page: PageName, caseId: string | null): string {
+  switch (page) {
+    case 'Home':
+      return '#/home';
+    case 'Dashboard':
+      return '#/dashboard';
+    case 'Play Investigation':
+      return '#/lobby';
+    case 'My History':
+      return '#/history';
+    case 'Admin':
+      return '#/admin';
+    case 'Investigation':
+      return caseId ? `#/case/${encodeURIComponent(caseId)}` : '#/lobby';
+  }
+}
+
+function persistNavState(next: PersistedNavState): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(NAV_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+function readInitialNavigationSnapshot(hasTeam: boolean) {
+  if (typeof window === 'undefined') {
+    return {
+      page: 'Home' as PageName,
+      activeCase: null as InvestigationCase | null,
+      caseTab: 'Evidence' as CaseTab,
+      difficultyFilter: 'Easy' as CaseDifficulty,
+    };
+  }
+  const saved = stored<PersistedNavState | null>(NAV_STORAGE_KEY, null);
+  const hashRoute = parseHashToRoute(window.location.hash);
+  const caseTab: CaseTab = saved?.activeTab === 'Suspects' ? 'Suspects' : 'Evidence';
+  const difficultyFilter: CaseDifficulty =
+    saved?.difficultyFilter === 'Medium' || saved?.difficultyFilter === 'Hard'
+      ? saved.difficultyFilter
+      : 'Easy';
+
+  if (!hasTeam) {
+    return {
+      page: 'Home' as PageName,
+      activeCase: null as InvestigationCase | null,
+      caseTab,
+      difficultyFilter,
+    };
+  }
+
+  const candidatePage: PageName = hashRoute?.page || saved?.activeView || 'Home';
+  const candidateCaseId = hashRoute?.page
+    ? hashRoute.caseId
+    : saved?.selectedCaseId || null;
+
+  if (candidatePage === 'Investigation' && candidateCaseId) {
+    const matched = getCachedCaseById(candidateCaseId);
+    if (matched) {
+      return {
+        page: 'Investigation' as PageName,
+        activeCase: matched,
+        caseTab,
+        difficultyFilter: matched.difficulty,
+      };
+    }
+    return {
+      page: 'Play Investigation' as PageName,
+      activeCase: null as InvestigationCase | null,
+      caseTab,
+      difficultyFilter,
+    };
+  }
+
+  return {
+    page: (candidatePage === 'Investigation' ? 'Play Investigation' : candidatePage) as PageName,
+    activeCase: null as InvestigationCase | null,
+    caseTab,
+    difficultyFilter,
+  };
+}
+
+function readInitialCaseHydration(
+  initialCase: InvestigationCase | null,
+  initialTeam: TeamInfo | null,
+  initialLocalRankings: Record<string, Record<string, CaseScore>>,
+  initialLeaderboard: RankingEntry[]
+) {
+  if (!initialCase || !initialTeam || typeof window === 'undefined') {
+    return {
+      report: '',
+      selectedEvidence: [] as number[],
+      timelineOrder: [] as string[],
+      hintCount: 0,
+      elapsed: 0,
+      result: null as CaseScore | null,
+      sessionReady: false,
+    };
+  }
+
+  const localSolved =
+    initialLocalRankings[initialTeam.id]?.[initialCase.id] ||
+    initialLocalRankings.solo?.[initialCase.id];
+  const remoteSolved = initialLeaderboard.find(
+    (entry) => entry.teamId === initialTeam.id || entry.id === `team_${initialTeam.id}`
+  )?.caseScores?.[initialCase.id];
+  const solvedScore = localSolved || remoteSolved || null;
+  if (solvedScore) {
+    return {
+      report: '',
+      selectedEvidence: [] as number[],
+      timelineOrder: [...initialCase.timeline],
+      hintCount: 0,
+      elapsed: 0,
+      result: {
+        ...solvedScore,
+        message: 'This case is already closed. Your verified result is shown below.',
+      } as CaseScore,
+      sessionReady: false,
+    };
+  }
+
+  const savedProgress = stored<{
+    caseId?: string;
+    report?: string;
+    selectedEvidence?: number[];
+    timelineOrder?: string[];
+    hintCount?: number;
+  } | null>('arena-progress', null);
+  const resumeLocal = savedProgress?.caseId === initialCase.id ? savedProgress : null;
+
+  const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+  const sessionKey = `${initialTeam.id}:${initialCase.id}`;
+  let localSess = sessions[sessionKey];
+  if (!localSess) {
+    localSess = {
+      startedAt: Date.now(),
+      hintsUsed: resumeLocal?.hintCount || 0,
+      completed: false,
+      progress: {
+        report: resumeLocal?.report || '',
+        selectedEvidence: resumeLocal?.selectedEvidence || [],
+        timelineOrder: resumeLocal?.timelineOrder?.length
+          ? resumeLocal.timelineOrder
+          : [...initialCase.timeline],
+      },
+    };
+    try {
+      sessions[sessionKey] = localSess;
+      localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
+  const restoredReport = resumeLocal?.report ?? localSess.progress?.report ?? '';
+  const restoredEvidence =
+    resumeLocal?.selectedEvidence ?? localSess.progress?.selectedEvidence ?? [];
+  const restoredTimeline = resumeLocal?.timelineOrder?.length
+    ? resumeLocal.timelineOrder
+    : localSess.progress?.timelineOrder?.length
+    ? localSess.progress.timelineOrder
+    : [...initialCase.timeline];
+  const restoredHints = Math.max(resumeLocal?.hintCount || 0, localSess.hintsUsed || 0);
+  const restoredElapsed = Math.max(0, Math.floor((Date.now() - localSess.startedAt) / 1000));
+
+  return {
+    report: restoredReport,
+    selectedEvidence: restoredEvidence,
+    timelineOrder: restoredTimeline,
+    hintCount: restoredHints,
+    elapsed: restoredElapsed,
+    result: null as CaseScore | null,
+    sessionReady: true,
+  };
+}
+
 export default function App() {
-  const [page, setPage] = useState<PageName>('Home');
+  const initialTeamCacheRef = useRef<CachedTeamRecord | null>(readCachedTeamRecord());
+  const initialSharedCacheRef = useRef<CachedSharedArenaState>(readCachedSharedArenaState());
+  const initialLocalRankingsRef = useRef<Record<string, Record<string, CaseScore>>>(
+    stored<Record<string, Record<string, CaseScore>>>('arena-local-rankings', {})
+  );
+  const initialNavRef = useRef(
+    readInitialNavigationSnapshot(Boolean(initialTeamCacheRef.current?.team))
+  );
+  const initialHydrationRef = useRef(
+    readInitialCaseHydration(
+      initialNavRef.current.activeCase,
+      initialTeamCacheRef.current?.team || null,
+      initialLocalRankingsRef.current,
+      initialSharedCacheRef.current.leaderboard
+    )
+  );
+
+  const [page, setPage] = useState<PageName>(() => initialNavRef.current.page);
+  const [caseTab, setCaseTab] = useState<CaseTab>(() => initialNavRef.current.caseTab);
   const [user, setUser] = useState<User | null>(null);
   const [supabaseAccessToken, setSupabaseAccessToken] = useState<string>('');
   const [adminToken, setAdminToken] = useState<string>(() => stored<string>('arena-admin-token', ''));
@@ -477,32 +766,46 @@ export default function App() {
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
   const [useLocalBackend, setUseLocalBackend] = useState(!supabaseConfigured);
   const localBackendRef = useRef(!supabaseConfigured);
-  const [activeCase, setActiveCase] = useState<InvestigationCase | null>(null);
-  const [report, setReport] = useState('');
-  const [selectedEvidence, setSelectedEvidence] = useState<number[]>([]);
-  const [timelineOrder, setTimelineOrder] = useState<string[]>([]);
-  const [hintCount, setHintCount] = useState(0);
+  const [activeCase, setActiveCase] = useState<InvestigationCase | null>(
+    () => initialNavRef.current.activeCase
+  );
+  const [report, setReport] = useState(() => initialHydrationRef.current.report);
+  const [selectedEvidence, setSelectedEvidence] = useState<number[]>(
+    () => initialHydrationRef.current.selectedEvidence
+  );
+  const [timelineOrder, setTimelineOrder] = useState<string[]>(
+    () => initialHydrationRef.current.timelineOrder
+  );
+  const [hintCount, setHintCount] = useState(() => initialHydrationRef.current.hintCount);
   const [hintBusy, setHintBusy] = useState(false);
-  const [sessionReady, setSessionReady] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [result, setResult] = useState<CaseScore | null>(null);
+  const [sessionReady, setSessionReady] = useState(() => initialHydrationRef.current.sessionReady);
+  const [elapsed, setElapsed] = useState(() => initialHydrationRef.current.elapsed);
+  const [result, setResult] = useState<CaseScore | null>(() => initialHydrationRef.current.result);
   const [submissionBusy, setSubmissionBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [teamEntryError, setTeamEntryError] = useState('');
   const [teamBusy, setTeamBusy] = useState(false);
   const [teamLoading, setTeamLoading] = useState(false);
-  const [leaderboard, setLeaderboard] = useState<RankingEntry[]>([]);
+  const [leaderboard, setLeaderboard] = useState<RankingEntry[]>(
+    () => initialSharedCacheRef.current.leaderboard
+  );
   const [serverRankings, setServerRankings] = useState<RankingEntry[]>([]);
   const [serverMyRank, setServerMyRank] = useState<number | null>(null);
-  const [localRankings, setLocalRankings] = useState<Record<string, Record<string, CaseScore>>>(() =>
-    stored<Record<string, Record<string, CaseScore>>>('arena-local-rankings', {})
+  const [localRankings, setLocalRankings] = useState<Record<string, Record<string, CaseScore>>>(
+    () => initialLocalRankingsRef.current
   );
-  const [games, setGames] = useState<GameLobby[]>([]);
-  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
-  const [registeredCount, setRegisteredCount] = useState<number | null>(null);
+  const [games, setGames] = useState<GameLobby[]>(() => initialSharedCacheRef.current.games);
+  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>(
+    () => initialSharedCacheRef.current.announcements
+  );
+  const [registeredCount, setRegisteredCount] = useState<number | null>(
+    () => initialSharedCacheRef.current.registeredCount
+  );
   const [teamName, setTeamName] = useState('');
   const [accessCode, setAccessCode] = useState('');
-  const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(null);
+  const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(
+    () => initialTeamCacheRef.current?.team || null
+  );
   const [gameClock, setGameClock] = useState<GameClockState>(EMPTY_GAME_CLOCK);
   const [gameElapsed, setGameElapsed] = useState(0);
   const serverCaseModeRef = useRef(false);
@@ -513,9 +816,21 @@ export default function App() {
   const finalizeSubmissionRef = useRef<(isAutoExpired?: boolean) => Promise<void>>(async () => {});
   const mainRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState('');
-  const [difficultyFilter, setDifficultyFilter] = useState<CaseDifficulty>('Easy');
+  const [difficultyFilter, setDifficultyFilter] = useState<CaseDifficulty>(
+    () => initialNavRef.current.difficultyFilter
+  );
   const [muted, setMuted] = useState<boolean>(() => stored('arena-muted', true));
   const [mobileMenu, setMobileMenu] = useState(false);
+  const teamInfoRef = useRef(teamInfo);
+  teamInfoRef.current = teamInfo;
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const activeCaseRef = useRef(activeCase);
+  activeCaseRef.current = activeCase;
+  const caseTabRef = useRef(caseTab);
+  caseTabRef.current = caseTab;
+  const difficultyFilterRef = useRef(difficultyFilter);
+  difficultyFilterRef.current = difficultyFilter;
 
   const activateLocalBackend = useCallback(async (): Promise<boolean> => {
     if (localBackendRef.current) return true;
@@ -768,21 +1083,45 @@ export default function App() {
           resetSupabaseBackoff();
         }
 
+        let nextLeaderboard = initialSharedCacheRef.current.leaderboard;
+        let nextGames = initialSharedCacheRef.current.games;
+        let nextAnnouncements = initialSharedCacheRef.current.announcements;
+        let nextRegisteredCount = initialSharedCacheRef.current.registeredCount;
+
         if (!myRankRes.error && myRankRes.data) {
           const ownEntry = mapRanking(myRankRes.data as Record<string, unknown>);
           setLeaderboard((prev) => {
             const others = prev.filter(
               (entry) => entry.teamId !== ownEntry.teamId && entry.id !== ownEntry.id
             );
-            return [ownEntry, ...others];
+            nextLeaderboard = [ownEntry, ...others];
+            return nextLeaderboard;
           });
         }
-        if (!gamesRes.error) setGames((gamesRes.data || []).map(mapGame));
+        if (!gamesRes.error) {
+          nextGames = (gamesRes.data || []).map(mapGame);
+          setGames(nextGames);
+        }
         if (!announcementsRes.error) {
-          setAnnouncements((announcementsRes.data || []).map(mapAnnouncement));
+          nextAnnouncements = (announcementsRes.data || []).map(mapAnnouncement);
+          setAnnouncements(nextAnnouncements);
         }
         if (!statsRes.error && statsRes.data) {
-          setRegisteredCount(statsRes.data.registered_teams ?? 0);
+          nextRegisteredCount = statsRes.data.registered_teams ?? 0;
+          setRegisteredCount(nextRegisteredCount);
+        }
+        if (!firstErr) {
+          writeCachedSharedArenaState({
+            games: nextGames,
+            announcements: nextAnnouncements,
+            registeredCount: nextRegisteredCount,
+            leaderboard: nextLeaderboard,
+          });
+          try {
+            sessionStorage.setItem(SESSION_HYDRATED_KEY, user.id);
+          } catch {
+            // Ignore sessionStorage restriction errors.
+          }
         }
       } catch (err) {
         recordSupabaseFailure(err);
@@ -837,6 +1176,17 @@ export default function App() {
       return undefined;
     }
     initialLoadedUserIdRef.current = user.id;
+
+    try {
+      const alreadyHydrated = sessionStorage.getItem(SESSION_HYDRATED_KEY) === user.id;
+      const hasCachedGames = initialSharedCacheRef.current.games.length > 0;
+      if (alreadyHydrated && hasCachedGames) {
+        return undefined;
+      }
+    } catch {
+      // Fall through to one-time initial load if sessionStorage is unavailable.
+    }
+
     void refreshArenaDataRef.current();
     return undefined;
   }, [user, useLocalBackend]);
@@ -1001,20 +1351,57 @@ export default function App() {
   const currentUserId = user?.id || '';
   useEffect(() => {
     if (!currentUserId) {
-      setTeamInfo(null);
+      setTeamLoading(false);
+      return undefined;
+    }
+    const cachedRecord = readCachedTeamRecord();
+    if (cachedRecord && cachedRecord.userId === currentUserId) {
+      setTeamInfo(cachedRecord.team);
       setTeamLoading(false);
       return undefined;
     }
     let active = true;
-    setTeamLoading(true);
+    setTeamLoading(!cachedRecord);
     setTeamEntryError('');
     invokeRef
       .current<{ teams?: TeamInfo[] }>('listMyTeams')
       .then((data) => {
-        if (active) setTeamInfo(data?.teams?.[0] || null);
+        if (!active) return;
+        const foundTeam = data?.teams?.[0] || null;
+        if (foundTeam) {
+          saveCachedTeamRecord(currentUserId, foundTeam);
+          setTeamInfo(foundTeam);
+          const restoredNav = readInitialNavigationSnapshot(true);
+          if (restoredNav.activeCase) {
+            const hydrated = readInitialCaseHydration(
+              restoredNav.activeCase,
+              foundTeam,
+              localRankings,
+              leaderboard
+            );
+            setCaseTab(restoredNav.caseTab);
+            setDifficultyFilter(restoredNav.difficultyFilter);
+            setActiveCase(restoredNav.activeCase);
+            setPage('Investigation');
+            setReport(hydrated.report);
+            setSelectedEvidence(hydrated.selectedEvidence);
+            setTimelineOrder(hydrated.timelineOrder);
+            setHintCount(hydrated.hintCount);
+            setElapsed(hydrated.elapsed);
+            setResult(hydrated.result);
+            setSessionReady(hydrated.sessionReady);
+          } else if (restoredNav.page !== 'Home') {
+            setCaseTab(restoredNav.caseTab);
+            setDifficultyFilter(restoredNav.difficultyFilter);
+            setPage(restoredNav.page);
+          }
+        } else {
+          saveCachedTeamRecord(currentUserId, null);
+          setTeamInfo(null);
+        }
       })
       .catch((error: unknown) => {
-        if (active) {
+        if (active && !cachedRecord) {
           setTeamEntryError(error instanceof Error ? error.message : 'Unable to load team.');
         }
       })
@@ -1448,11 +1835,254 @@ export default function App() {
     [teamInfo?.id]
   );
 
+  const handleCaseTabChange = useCallback(
+    (nextTab: CaseTab) => {
+      setCaseTab(nextTab);
+      if (teamInfoRef.current) {
+        persistNavState({
+          activeView: pageRef.current,
+          selectedCaseId:
+            pageRef.current === 'Investigation' ? activeCaseRef.current?.id || null : null,
+          activeTab: nextTab,
+          difficultyFilter: difficultyFilterRef.current,
+        });
+      }
+    },
+    []
+  );
+
+  const applyLocalCaseRestoration = useCallback(
+    (gameCase: InvestigationCase) => {
+      const currentTeam = teamInfoRef.current;
+      if (!currentTeam) return;
+
+      const previousScore = effectiveLeaderboard.find(
+        (score) =>
+          Object.hasOwn(score.caseScores || {}, gameCase.id) &&
+          (score.teamId === currentTeam.id ||
+            score.id === `local_${currentTeam.id}` ||
+            (user?.id ? score.memberIds?.includes(user.id) : false))
+      );
+
+      setActiveCase(gameCase);
+      setPage('Investigation');
+      setDifficultyFilter(gameCase.difficulty);
+      setMobileMenu(false);
+      setNotice('');
+      persistNavState({
+        activeView: 'Investigation',
+        selectedCaseId: gameCase.id,
+        activeTab: caseTabRef.current,
+        difficultyFilter: gameCase.difficulty,
+      });
+
+      if (previousScore) {
+        setResult({
+          ...(previousScore.caseScores?.[gameCase.id] || { score: 0 }),
+          message: 'This case is already closed. Your verified result is shown below.',
+        });
+        setSessionReady(false);
+        return;
+      }
+
+      const hydrated = readInitialCaseHydration(
+        gameCase,
+        currentTeam,
+        localRankings,
+        effectiveLeaderboard
+      );
+      setReport(hydrated.report);
+      setSelectedEvidence(hydrated.selectedEvidence);
+      setTimelineOrder(hydrated.timelineOrder);
+      setHintCount(hydrated.hintCount);
+      setElapsed(hydrated.elapsed);
+      setResult(hydrated.result);
+      setSessionReady(hydrated.sessionReady);
+    },
+    [effectiveLeaderboard, localRankings, user?.id]
+  );
+
+  const applyLocalCaseRestorationRef = useRef(applyLocalCaseRestoration);
+  applyLocalCaseRestorationRef.current = applyLocalCaseRestoration;
+
+  // Initialize browser history stack with a root guard so Back never logs out or leaves the site for registered teams.
+  useEffect(() => {
+    if (!teamInfo) return undefined;
+    const currentState = window.history.state as { arenaManaged?: boolean } | null;
+    if (currentState?.arenaManaged) return undefined;
+
+    const currentPage = pageRef.current;
+    const currentCaseId = activeCaseRef.current?.id || null;
+    const currentHash = hashForRoute(currentPage, currentCaseId);
+
+    if (currentPage === 'Investigation' && currentCaseId) {
+      window.history.replaceState(
+        { arenaManaged: true, arenaRootGuard: true, page: 'Play Investigation', caseId: null },
+        '',
+        '#/lobby'
+      );
+      window.history.pushState(
+        { arenaManaged: true, page: 'Play Investigation', caseId: null },
+        '',
+        '#/lobby'
+      );
+      window.history.pushState(
+        { arenaManaged: true, page: 'Investigation', caseId: currentCaseId },
+        '',
+        currentHash
+      );
+    } else {
+      const guardPage: PageName =
+        currentPage === 'Investigation' ? 'Play Investigation' : currentPage;
+      const guardHash = hashForRoute(guardPage, null);
+      window.history.replaceState(
+        { arenaManaged: true, arenaRootGuard: true, page: guardPage, caseId: null },
+        '',
+        guardHash
+      );
+      window.history.pushState(
+        { arenaManaged: true, page: guardPage, caseId: null },
+        '',
+        guardHash
+      );
+    }
+    return undefined;
+  }, [teamInfo]);
+
+  // Sync Chrome Back / Forward buttons cleanly between in-app routes with zero extra DB reads.
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (!teamInfoRef.current) return;
+      const state = event.state as {
+        arenaManaged?: boolean;
+        arenaRootGuard?: boolean;
+        page?: PageName;
+        caseId?: string | null;
+      } | null;
+
+      if (state?.arenaRootGuard) {
+        const stayPage: PageName =
+          pageRef.current === 'Play Investigation' || state.page === 'Play Investigation'
+            ? 'Play Investigation'
+            : state.page && state.page !== 'Investigation'
+            ? state.page
+            : 'Play Investigation';
+        const stayHash = hashForRoute(stayPage, null);
+        window.history.pushState(
+          { arenaManaged: true, page: stayPage, caseId: null },
+          '',
+          stayHash
+        );
+        setPage(stayPage);
+        setActiveCase(null);
+        setResult(null);
+        setSessionReady(false);
+        setMobileMenu(false);
+        persistNavState({
+          activeView: stayPage,
+          selectedCaseId: null,
+          activeTab: caseTabRef.current,
+          difficultyFilter: difficultyFilterRef.current,
+        });
+        setNotice(
+          stayPage === 'Play Investigation'
+            ? 'You are in the Case Lobby. Use Log out in the sidebar to exit your team session.'
+            : 'You are at the start of your Arena session. Use Log out in the sidebar to exit.'
+        );
+        return;
+      }
+
+      const hashRoute = parseHashToRoute(window.location.hash);
+      const targetPage: PageName = hashRoute?.page || state?.page || 'Play Investigation';
+      const targetCaseId = hashRoute?.page ? hashRoute.caseId : state?.caseId ?? null;
+
+      if (targetPage === 'Investigation' && targetCaseId) {
+        const matchedCase = getCachedCaseById(targetCaseId);
+        if (matchedCase) {
+          applyLocalCaseRestorationRef.current(matchedCase);
+          return;
+        }
+      }
+
+      const resolvedPage: PageName =
+        targetPage === 'Investigation' ? 'Play Investigation' : targetPage;
+      setPage(resolvedPage);
+      setActiveCase(null);
+      setResult(null);
+      setSessionReady(false);
+      setMobileMenu(false);
+      setNotice('');
+      persistNavState({
+        activeView: resolvedPage,
+        selectedCaseId: null,
+        activeTab: caseTabRef.current,
+        difficultyFilter: difficultyFilterRef.current,
+      });
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Persist difficulty filter changes in localStorage for reload restoration.
+  useEffect(() => {
+    if (!teamInfo) return;
+    persistNavState({
+      activeView: pageRef.current,
+      selectedCaseId: pageRef.current === 'Investigation' ? activeCaseRef.current?.id || null : null,
+      activeTab: caseTabRef.current,
+      difficultyFilter,
+    });
+  }, [difficultyFilter, teamInfo]);
+
+  // Warn only when closing/reloading an unsolved case that has unsaved draft selections.
+  useEffect(() => {
+    if (page !== 'Investigation' || !activeCase || result || submissionBusy) {
+      return undefined;
+    }
+    const timelineModified =
+      timelineOrder.length === activeCase.timeline.length &&
+      timelineOrder.some((step, idx) => step !== activeCase.timeline[idx]);
+    const hasUnsavedDraft =
+      report.trim().length > 0 ||
+      selectedEvidence.length > 0 ||
+      hintCount > 0 ||
+      timelineModified;
+    if (!hasUnsavedDraft) {
+      return undefined;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [page, activeCase, result, submissionBusy, report, selectedEvidence, hintCount, timelineOrder]);
+
   const openCase = async (gameCase: InvestigationCase, bypassGateCheck = false) => {
     if (!teamInfo) {
       setNotice('Register a team before starting an investigation.');
       return;
     }
+    const nextCaseTab: CaseTab = activeCase?.id === gameCase.id ? caseTab : 'Evidence';
+    const targetCaseHash = hashForRoute('Investigation', gameCase.id);
+    const pushCaseHistory = () => {
+      persistNavState({
+        activeView: 'Investigation',
+        selectedCaseId: gameCase.id,
+        activeTab: nextCaseTab,
+        difficultyFilter: gameCase.difficulty,
+      });
+      if (window.location.hash !== targetCaseHash) {
+        window.history.pushState(
+          { arenaManaged: true, page: 'Investigation', caseId: gameCase.id },
+          '',
+          targetCaseHash
+        );
+      }
+    };
+
     const previousScore = effectiveLeaderboard.find(
       (score) =>
         Object.hasOwn(score.caseScores || {}, gameCase.id) &&
@@ -1462,6 +2092,8 @@ export default function App() {
     );
     if (previousScore) {
       scrollPageToTop();
+      setCaseTab(nextCaseTab);
+      setDifficultyFilter(gameCase.difficulty);
       setActiveCase(gameCase);
       setPage('Investigation');
       setResult({
@@ -1470,6 +2102,7 @@ export default function App() {
       });
       setSessionReady(false);
       setNotice('');
+      pushCaseHistory();
       return;
     }
     if (!hasLiveEvent && !bypassGateCheck) {
@@ -1509,6 +2142,8 @@ export default function App() {
     } | null>('arena-progress', null);
     const resumeLocal = localProgress?.caseId === gameCase.id ? localProgress : null;
     caseFallbackRef.current = false;
+    setCaseTab(nextCaseTab);
+    setDifficultyFilter(gameCase.difficulty);
     setActiveCase(gameCase);
     setPage('Investigation');
     setSessionReady(false);
@@ -1521,6 +2156,7 @@ export default function App() {
     setElapsed(0);
     setResult(null);
     setNotice('');
+    pushCaseHistory();
     playSignal(muted, 540);
     const applySessionResponse = (session: {
       progress?: {
@@ -1536,17 +2172,46 @@ export default function App() {
         (remoteProgress.selectedEvidence?.length || 0) > 0 ||
         Boolean(remoteProgress.report) ||
         (remoteProgress.timelineOrder?.length || 0) > 0;
+      const nextReport = hasRemote ? remoteProgress.report || '' : resumeLocal?.report || '';
+      const nextEvidence = hasRemote
+        ? remoteProgress.selectedEvidence || []
+        : resumeLocal?.selectedEvidence || [];
+      const nextTimeline = hasRemote
+        ? remoteProgress.timelineOrder?.length
+          ? remoteProgress.timelineOrder
+          : [...gameCase.timeline]
+        : resumeLocal?.timelineOrder?.length
+        ? resumeLocal.timelineOrder
+        : [...gameCase.timeline];
       if (hasRemote) {
-        setReport(remoteProgress.report || '');
-        setSelectedEvidence(remoteProgress.selectedEvidence || []);
-        setTimelineOrder(
-          remoteProgress.timelineOrder?.length
-            ? remoteProgress.timelineOrder
-            : [...gameCase.timeline]
-        );
+        setReport(nextReport);
+        setSelectedEvidence(nextEvidence);
+        setTimelineOrder(nextTimeline);
       }
-      setHintCount(session.hintsUsed || 0);
-      setElapsed(session.elapsedSeconds || 0);
+      const nextHints = Math.max(resumeLocal?.hintCount || 0, session.hintsUsed || 0);
+      const nextElapsed = session.elapsedSeconds || 0;
+      if (teamInfo) {
+        const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
+        const sessionKey = `${teamInfo.id}:${gameCase.id}`;
+        const existingSess = sessions[sessionKey];
+        sessions[sessionKey] = {
+          startedAt: Date.now() - nextElapsed * 1000,
+          hintsUsed: Math.max(nextHints, existingSess?.hintsUsed || 0),
+          completed: Boolean(existingSess?.completed),
+          progress: {
+            report: nextReport,
+            selectedEvidence: nextEvidence,
+            timelineOrder: nextTimeline,
+          },
+        };
+        try {
+          localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
+        } catch {
+          // Ignore storage quota errors.
+        }
+      }
+      setHintCount(nextHints);
+      setElapsed(nextElapsed);
       setSessionReady(true);
     };
 
@@ -1834,7 +2499,24 @@ export default function App() {
         name: teamName.trim(),
         accessCode: trimmedCode,
       });
+      saveCachedTeamRecord(user?.id || '', data);
       setTeamInfo(data);
+      persistNavState({
+        activeView: 'Home',
+        selectedCaseId: null,
+        activeTab: 'Evidence',
+        difficultyFilter: difficultyFilterRef.current,
+      });
+      window.history.replaceState(
+        { arenaManaged: true, arenaRootGuard: true, page: 'Play Investigation', caseId: null },
+        '',
+        '#/lobby'
+      );
+      window.history.pushState(
+        { arenaManaged: true, page: 'Home', caseId: null },
+        '',
+        '#/home'
+      );
       void refreshArenaData();
     } catch (error) {
       setTeamEntryError(error instanceof Error ? error.message : 'Unable to register team.');
@@ -1876,6 +2558,14 @@ export default function App() {
       localStorage.removeItem('arena-completed');
       localStorage.removeItem('arena-local-sessions');
       localStorage.removeItem('arena-local-rankings');
+      localStorage.removeItem(TEAM_CACHE_STORAGE_KEY);
+      localStorage.removeItem(NAV_STORAGE_KEY);
+      localStorage.removeItem(ARENA_SHARED_CACHE_KEY);
+      try {
+        sessionStorage.removeItem(SESSION_HYDRATED_KEY);
+      } catch {
+        // Ignore sessionStorage restrictions.
+      }
       setLocalRankings({});
       setServerRankings([]);
       setServerMyRank(null);
@@ -1890,6 +2580,7 @@ export default function App() {
       setTeamName('');
       setAccessCode('');
       setActiveCase(null);
+      setCaseTab('Evidence');
       setResult(null);
       setSessionReady(false);
       setReport('');
@@ -1900,6 +2591,7 @@ export default function App() {
       setPage('Home');
       setMobileMenu(false);
       setNotice('');
+      window.history.replaceState(null, '', '#/home');
       if (supabase && !localBackendRef.current) {
         await Promise.race([
           supabase.auth.signOut(),
@@ -2013,8 +2705,23 @@ export default function App() {
     setPage(label);
     setActiveCase(null);
     setResult(null);
+    setSessionReady(false);
     setMobileMenu(false);
     setNotice('');
+    persistNavState({
+      activeView: label,
+      selectedCaseId: null,
+      activeTab: caseTabRef.current,
+      difficultyFilter: difficultyFilterRef.current,
+    });
+    const targetHash = hashForRoute(label, null);
+    if (window.location.hash !== targetHash) {
+      window.history.pushState(
+        { arenaManaged: true, page: label, caseId: null },
+        '',
+        targetHash
+      );
+    }
   };
 
   if (!teamInfo) {
@@ -2235,6 +2942,8 @@ export default function App() {
               <InvestigationView
                 key={activeCase.id}
                 activeCase={activeCase}
+                activeTab={caseTab}
+                onTabChange={handleCaseTabChange}
                 report={report}
                 setReport={setReport}
                 selectedEvidence={selectedEvidence}
@@ -3377,6 +4086,8 @@ function CaseTile({
 
 function InvestigationView({
   activeCase,
+  activeTab,
+  onTabChange,
   report,
   setReport,
   selectedEvidence,
@@ -3400,6 +4111,8 @@ function InvestigationView({
   goTo,
 }: {
   activeCase: InvestigationCase;
+  activeTab: CaseTab;
+  onTabChange: (tab: CaseTab) => void;
   report: string;
   setReport: (v: string) => void;
   selectedEvidence: number[];
@@ -3422,7 +4135,6 @@ function InvestigationView({
   submissionBusy: boolean;
   goTo: (p: PageName) => void;
 }) {
-  const [activeTab, setActiveTab] = useState<'Evidence' | 'Suspects'>('Evidence');
   const [zoomedImage, setZoomedImage] = useState<{
     src: string;
     title: string;
@@ -3626,7 +4338,7 @@ function InvestigationView({
                     role="tab"
                     aria-selected={activeTab === tab}
                     className={activeTab === tab ? 'tab-active' : ''}
-                    onClick={() => setActiveTab(tab)}
+                    onClick={() => onTabChange(tab)}
                   >
                     <span>{tab}</span>
                     {tab === 'Evidence' && (
