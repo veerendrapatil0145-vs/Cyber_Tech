@@ -1,7 +1,6 @@
 export interface TeamInfo {
   id: string;
   name: string;
-  inviteCode: string;
   ownerId: string;
   memberIds: string[];
   createdAt: string;
@@ -42,7 +41,6 @@ export interface GameLobby {
   id: string;
   name: string;
   caseId: string;
-  inviteCode: string;
   status: 'open' | 'live' | 'paused' | 'ended';
   participantCount: number;
   createdAt: string;

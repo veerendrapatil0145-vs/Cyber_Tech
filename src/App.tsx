@@ -60,9 +60,19 @@ import * as XLSX from 'xlsx';
 import heroForensicDeskImg from './assets/images/hero_cybersec_circuit_1795336448818.jpg';
 import authCampusArchiveImg from './assets/images/cybersec_light_canvas_1795336276523.jpg';
 import caseArchiveBackdropImg from './assets/images/cybersec_soc_backdrop_1795336277843.jpg';
-import { cases, getCaseMaxScore, type CaseDifficulty, type InvestigationCase } from './cases';
+import { getCaseMaxScore, type CaseDifficulty, type InvestigationCase } from './cases';
+import { getCachedCases, getCachedCaseById } from './caseCache';
 import { gradeCaseVerdictLocally } from './caseAnswerFallback';
+import {
+  createLocalUser,
+  getOrCreateLocalPlayerId,
+  isSupabaseInCooldown,
+  recordSupabaseFailure,
+  resetSupabaseBackoff,
+} from './localPlayerAuth';
 import { isAdminUser, supabase, supabaseConfigured } from './supabase.js';
+
+const cases = getCachedCases();
 
 type PageName =
   | 'Home'
@@ -75,7 +85,6 @@ type PageName =
 interface TeamInfo {
   id: string;
   name: string;
-  inviteCode?: string;
   slot?: number;
 }
 
@@ -89,6 +98,7 @@ interface CaseScore {
   submittedSummary?: string;
   hintsUsed?: number;
   elapsedSeconds?: number;
+  submittedAt?: string;
   rank?: number;
   message?: string;
   explanations?: Array<{
@@ -113,7 +123,6 @@ interface RankingEntry {
 interface GameLobby {
   id: string;
   name: string;
-  inviteCode?: string;
   participantCount?: number;
   caseId?: string;
   status?: string;
@@ -425,7 +434,6 @@ const mapGame = (row: Record<string, unknown>): GameLobby => {
   return {
     ...(row as unknown as GameLobby),
     name,
-    inviteCode: (row.invite_code as string) ?? (row.inviteCode as string),
     participantCount: (row.participant_count as number) ?? (row.participantCount as number),
     caseId: (row.case_id as string) ?? (row.caseId as string),
     durationMinutes,
@@ -509,38 +517,6 @@ export default function App() {
   const [muted, setMuted] = useState<boolean>(() => stored('arena-muted', true));
   const [mobileMenu, setMobileMenu] = useState(false);
 
-  useEffect(() => {
-    if (!supabase) {
-      setTeamEntryError('Supabase is not configured. Add your project URL and publishable key to .env.local.');
-      return undefined;
-    }
-    const client = supabase;
-    let creatingAnonymousSession = false;
-    const {
-      data: { subscription },
-    } = client.auth.onAuthStateChange((event, session) => {
-      const currentUser = session?.user || null;
-      setUser(currentUser);
-      setSupabaseAccessToken(session?.access_token || '');
-      setAdmin(isAdminUser(currentUser) || Boolean(stored<string>('arena-admin-token', '')));
-      setAuthReady(true);
-      if (event === 'INITIAL_SESSION' && !currentUser && !creatingAnonymousSession) {
-        creatingAnonymousSession = true;
-        window.setTimeout(() => {
-          client.auth
-            .signInAnonymously()
-            .then(({ error }) => {
-              if (error) setTeamEntryError(error.message);
-            })
-            .catch((error: unknown) =>
-              setTeamEntryError(error instanceof Error ? error.message : 'Anonymous sign-in failed.')
-            );
-        }, 0);
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, []);
-
   const activateLocalBackend = useCallback(async (): Promise<boolean> => {
     if (localBackendRef.current) return true;
     try {
@@ -555,6 +531,93 @@ export default function App() {
       return false;
     }
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let resolvedUser = false;
+
+    const enableLocalFallbackSession = async (fallbackErrorMessage?: string) => {
+      const ok = await activateLocalBackend();
+      if (!active) return;
+      if (ok) {
+        resolvedUser = true;
+        setUser(createLocalUser(getOrCreateLocalPlayerId()));
+        setSupabaseAccessToken('');
+        setAdmin(Boolean(stored<string>('arena-admin-token', '')));
+        setTeamEntryError('');
+        setAuthReady(true);
+      } else {
+        setAuthReady(true);
+        if (fallbackErrorMessage) {
+          setTeamEntryError(fallbackErrorMessage);
+        }
+      }
+    };
+
+    if (!supabase) {
+      void enableLocalFallbackSession(
+        'Supabase is not configured. Add your project URL and publishable key to .env.local.'
+      );
+      return () => {
+        active = false;
+      };
+    }
+
+    const client = supabase;
+    let creatingAnonymousSession = false;
+    const fallbackTimer = window.setTimeout(() => {
+      if (!resolvedUser && active) {
+        void enableLocalFallbackSession();
+      }
+    }, 2500);
+
+    const {
+      data: { subscription },
+    } = client.auth.onAuthStateChange((event, session) => {
+      if (!active || localBackendRef.current) return;
+      const currentUser = session?.user || null;
+      if (currentUser) {
+        resolvedUser = true;
+        window.clearTimeout(fallbackTimer);
+      }
+      setUser(currentUser);
+      setSupabaseAccessToken(session?.access_token || '');
+      setAdmin(isAdminUser(currentUser) || Boolean(stored<string>('arena-admin-token', '')));
+      setAuthReady(true);
+      if (event === 'INITIAL_SESSION' && !currentUser && !creatingAnonymousSession) {
+        creatingAnonymousSession = true;
+        window.setTimeout(() => {
+          if (!active || localBackendRef.current) return;
+          Promise.race([
+            client.auth.signInAnonymously(),
+            new Promise<{ error: Error }>((resolve) =>
+              window.setTimeout(() => resolve({ error: new Error('Anonymous sign-in timed out.') }), 2500)
+            ),
+          ])
+            .then((res) => {
+              if (!active || localBackendRef.current) return;
+              if (res.error) {
+                recordSupabaseFailure(res.error);
+                void enableLocalFallbackSession(res.error.message);
+              }
+            })
+            .catch((error: unknown) => {
+              if (!active || localBackendRef.current) return;
+              recordSupabaseFailure(error);
+              void enableLocalFallbackSession(
+                error instanceof Error ? error.message : 'Anonymous sign-in failed.'
+              );
+            });
+        }, 0);
+      }
+    });
+
+    return () => {
+      active = false;
+      window.clearTimeout(fallbackTimer);
+      subscription.unsubscribe();
+    };
+  }, [activateLocalBackend]);
 
   const callLocalArena = useCallback(
     async <T = Record<string, unknown>>(
@@ -619,40 +682,14 @@ export default function App() {
     }
   }, [user, adminToken, supabaseAccessToken, admin]);
 
-  useEffect(() => {
-    if (!user) return undefined;
-    if (!supabase || useLocalBackend) {
-      let active = true;
-      const applyState = (payload: {
-        rankings?: Record<string, unknown>[];
-        myRank?: number;
-        games?: Record<string, unknown>[];
-        announcements?: Record<string, unknown>[];
-        stats?: { registered_teams?: number };
-      }) => {
-        if (!active) return;
-        if (Array.isArray(payload.rankings)) {
-          setLeaderboard(payload.rankings.map(mapRanking));
-        }
-        if (typeof payload.myRank === 'number') {
-          setServerMyRank(payload.myRank);
-        }
-        setGames((payload.games || []).map(mapGame));
-        setAnnouncements((payload.announcements || []).map(mapAnnouncement));
-        if (typeof payload.stats?.registered_teams === 'number') {
-          setRegisteredCount(payload.stats.registered_teams);
-        }
-      };
-
-      const loadLocalState = async () => {
+  const refreshArenaData = useCallback(
+    async (explicit = false) => {
+      if (!user) return;
+      if (!supabase || useLocalBackend) {
         try {
           const stateHeaders: Record<string, string> = { 'x-arena-player': user.id };
-          if (adminToken) {
-            stateHeaders['x-arena-admin'] = adminToken;
-          }
-          const response = await fetch('/api/state', {
-            headers: stateHeaders,
-          });
+          if (adminToken) stateHeaders['x-arena-admin'] = adminToken;
+          const response = await fetch('/api/state', { headers: stateHeaders });
           if (!response.ok) return;
           const payload = (await response.json()) as {
             rankings?: Record<string, unknown>[];
@@ -662,7 +699,15 @@ export default function App() {
             stats?: { registered_teams?: number };
             isAdmin?: boolean;
           };
-          applyState(payload);
+          setLeaderboard((payload.rankings || []).map(mapRanking));
+          if (typeof payload.myRank === 'number') {
+            setServerMyRank(payload.myRank);
+          }
+          setGames((payload.games || []).map(mapGame));
+          setAnnouncements((payload.announcements || []).map(mapAnnouncement));
+          if (typeof payload.stats?.registered_teams === 'number') {
+            setRegisteredCount(payload.stats.registered_teams);
+          }
           if (typeof payload.isAdmin === 'boolean') {
             if (payload.isAdmin) {
               setAdmin(true);
@@ -673,11 +718,90 @@ export default function App() {
             }
           }
         } catch {
-          // Keep existing state if offline.
+          // Ignore transient refresh failure.
         }
-      };
+        return;
+      }
 
-      void loadLocalState();
+      if (isSupabaseInCooldown()) {
+        if (explicit) {
+          setNotice('Database is cooling down after a rate limit or timeout. Using cached data.');
+        }
+        return;
+      }
+
+      const client = supabase;
+      try {
+        const teamIdForRank = teamInfo?.id || '';
+        const myRankQuery = teamIdForRank
+          ? client
+              .from('rankings')
+              .select('id, team_id, team_name, score, elapsed_seconds, case_scores')
+              .eq('team_id', teamIdForRank)
+              .maybeSingle()
+          : client
+              .from('rankings')
+              .select('id, team_id, team_name, score, elapsed_seconds, case_scores')
+              .contains('member_ids', [user.id])
+              .limit(1)
+              .maybeSingle();
+
+        const [myRankRes, gamesRes, announcementsRes, statsRes] = await Promise.all([
+          myRankQuery,
+          client
+            .from('games')
+            .select('id, name, case_id, status, created_at')
+            .order('created_at', { ascending: false })
+            .limit(5),
+          client
+            .from('announcements')
+            .select('id, title, message, created_at')
+            .order('created_at', { ascending: false })
+            .limit(4),
+          client.from('stats').select('registered_teams').eq('id', 1).maybeSingle(),
+        ]);
+
+        const firstErr = myRankRes.error || gamesRes.error || announcementsRes.error || statsRes.error;
+        if (firstErr) {
+          recordSupabaseFailure(firstErr);
+        } else {
+          resetSupabaseBackoff();
+        }
+
+        if (!myRankRes.error && myRankRes.data) {
+          const ownEntry = mapRanking(myRankRes.data as Record<string, unknown>);
+          setLeaderboard((prev) => {
+            const others = prev.filter(
+              (entry) => entry.teamId !== ownEntry.teamId && entry.id !== ownEntry.id
+            );
+            return [ownEntry, ...others];
+          });
+        }
+        if (!gamesRes.error) setGames((gamesRes.data || []).map(mapGame));
+        if (!announcementsRes.error) {
+          setAnnouncements((announcementsRes.data || []).map(mapAnnouncement));
+        }
+        if (!statsRes.error && statsRes.data) {
+          setRegisteredCount(statsRes.data.registered_teams ?? 0);
+        }
+      } catch (err) {
+        recordSupabaseFailure(err);
+      }
+    },
+    [user, useLocalBackend, adminToken, teamInfo?.id]
+  );
+
+  const refreshArenaDataRef = useRef(refreshArenaData);
+  refreshArenaDataRef.current = refreshArenaData;
+
+  const initialLoadedUserIdRef = useRef<string>('');
+  useEffect(() => {
+    if (!user) {
+      initialLoadedUserIdRef.current = '';
+      return undefined;
+    }
+    if (!supabase || useLocalBackend) {
+      void refreshArenaDataRef.current();
       if (typeof EventSource === 'undefined') return undefined;
       const source = new EventSource('/api/stream');
       source.addEventListener('state', (event) => {
@@ -689,150 +813,38 @@ export default function App() {
             announcements?: Record<string, unknown>[];
             stats?: { registered_teams?: number };
           };
-          applyState(payload);
-          if (!Array.isArray(payload.rankings)) {
-            void loadLocalState();
+          if (Array.isArray(payload.rankings)) {
+            setLeaderboard(payload.rankings.map(mapRanking));
+          }
+          if (typeof payload.myRank === 'number') {
+            setServerMyRank(payload.myRank);
+          }
+          setGames((payload.games || []).map(mapGame));
+          setAnnouncements((payload.announcements || []).map(mapAnnouncement));
+          if (typeof payload.stats?.registered_teams === 'number') {
+            setRegisteredCount(payload.stats.registered_teams);
           }
         } catch {
           // Ignore malformed stream events.
         }
       });
       return () => {
-        active = false;
         source.close();
       };
     }
 
-    const client = supabase;
-
-    const loadRankings = async () => {
-      const { data, error } = await client
-        .from('rankings')
-        .select('*')
-        .order('score', { ascending: false })
-        .limit(500);
-      if (!error) setLeaderboard((data || []).map(mapRanking));
-    };
-    const loadGames = async () => {
-      const { data, error } = await client
-        .from('games')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(20);
-      if (!error) setGames((data || []).map(mapGame));
-    };
-    const loadAnnouncements = async () => {
-      const { data, error } = await client
-        .from('announcements')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(4);
-      if (!error) setAnnouncements((data || []).map(mapAnnouncement));
-    };
-    const reload = () => {
-      void loadRankings();
-      void loadGames();
-      void loadAnnouncements();
-      void fetchSharedServerState();
-    };
-    reload();
-    const channel = client
-      .channel('arena-data')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rankings' }, loadRankings)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'games' }, loadGames)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'announcements' },
-        loadAnnouncements
-      )
-      .subscribe();
-
-    let source: EventSource | null = null;
-    if (typeof EventSource !== 'undefined') {
-      source = new EventSource('/api/stream');
-      source.addEventListener('state', () => {
-        void fetchSharedServerState();
-      });
+    if (initialLoadedUserIdRef.current === user.id) {
+      return undefined;
     }
-
-    return () => {
-      void client.removeChannel(channel);
-      source?.close();
-    };
-  }, [user, useLocalBackend, adminToken, fetchSharedServerState]);
-
-  const refreshArenaData = useCallback(async () => {
-    if (!user) return;
-    if (!supabase || useLocalBackend) {
-      try {
-        const stateHeaders: Record<string, string> = { 'x-arena-player': user.id };
-        if (adminToken) stateHeaders['x-arena-admin'] = adminToken;
-        const response = await fetch('/api/state', { headers: stateHeaders });
-        if (!response.ok) return;
-        const payload = (await response.json()) as {
-          rankings?: Record<string, unknown>[];
-          myRank?: number;
-          games?: Record<string, unknown>[];
-          announcements?: Record<string, unknown>[];
-          stats?: { registered_teams?: number };
-        };
-        setLeaderboard((payload.rankings || []).map(mapRanking));
-        if (typeof payload.myRank === 'number') {
-          setServerMyRank(payload.myRank);
-        }
-        setGames((payload.games || []).map(mapGame));
-        setAnnouncements((payload.announcements || []).map(mapAnnouncement));
-        if (typeof payload.stats?.registered_teams === 'number') {
-          setRegisteredCount(payload.stats.registered_teams);
-        }
-      } catch {
-        // Ignore transient refresh failure.
-      }
-      return;
-    }
-
-    const client = supabase;
-    const [rankingsRes, gamesRes, announcementsRes, statsRes] = await Promise.all([
-      client.from('rankings').select('*').order('score', { ascending: false }).limit(500),
-      client.from('games').select('*').order('created_at', { ascending: false }).limit(20),
-      client.from('announcements').select('*').order('created_at', { ascending: false }).limit(4),
-      client.from('stats').select('registered_teams').eq('id', 1).maybeSingle(),
-      fetchSharedServerState(),
-    ]);
-    if (!rankingsRes.error) setLeaderboard((rankingsRes.data || []).map(mapRanking));
-    if (!gamesRes.error) setGames((gamesRes.data || []).map(mapGame));
-    if (!announcementsRes.error) setAnnouncements((announcementsRes.data || []).map(mapAnnouncement));
-    if (!statsRes.error && statsRes.data) {
-      setRegisteredCount(statsRes.data.registered_teams ?? 0);
-    }
-  }, [user, useLocalBackend, adminToken, fetchSharedServerState]);
-
-  useEffect(() => {
-    if (!supabase || useLocalBackend) return undefined;
-    const client = supabase;
-    const loadStats = async () => {
-      const { data, error } = await client
-        .from('stats')
-        .select('registered_teams')
-        .eq('id', 1)
-        .maybeSingle();
-      if (!error) setRegisteredCount(data?.registered_teams ?? 0);
-    };
-    void loadStats();
-    const channel = client
-      .channel('arena-stats')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'stats' }, loadStats)
-      .subscribe();
-    return () => {
-      void client.removeChannel(channel);
-    };
-  }, [useLocalBackend]);
+    initialLoadedUserIdRef.current = user.id;
+    void refreshArenaDataRef.current();
+    return undefined;
+  }, [user, useLocalBackend]);
 
   useEffect(() => {
     if (!user || !teamInfo || !activeCase || page !== 'Investigation') {
       return undefined;
     }
-
     if (!supabase || useLocalBackend) {
       let active = true;
       const loadLocalSession = async () => {
@@ -861,63 +873,11 @@ export default function App() {
       };
 
       void loadLocalSession();
-      if (typeof EventSource === 'undefined') return undefined;
-      const source = new EventSource('/api/stream');
-      source.addEventListener('session', (event) => {
-        try {
-          const payload = JSON.parse((event as MessageEvent<string>).data) as {
-            teamId?: string;
-            caseId?: string;
-            lastWriter?: string;
-          };
-          if (
-            payload.teamId === teamInfo.id &&
-            payload.caseId === activeCase.id &&
-            payload.lastWriter !== user.id
-          ) {
-            void loadLocalSession();
-          }
-        } catch {
-          // Ignore malformed stream payload.
-        }
-      });
       return () => {
         active = false;
-        source.close();
       };
     }
-
-    const client = supabase;
-    const loadSession = async () => {
-      const { data, error } = await client
-        .from('sessions')
-        .select('*')
-        .eq('team_id', teamInfo.id)
-        .eq('case_id', activeCase.id)
-        .maybeSingle();
-      const session = data && mapSession(data as Record<string, unknown>);
-      if (error || !session?.progress || session.lastWriter === user.id) return;
-      if (typeof session.progress.report === 'string') {
-        setReport(session.progress.report);
-      }
-      setSelectedEvidence(session.progress.selectedEvidence || []);
-      if (session.progress.timelineOrder?.length) {
-        setTimelineOrder(session.progress.timelineOrder);
-      }
-      setHintCount(session.hintsUsed || 0);
-    };
-    void loadSession();
-    const channel = client
-      .channel(`session:${teamInfo.id}:${activeCase.id}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'sessions', filter: `team_id=eq.${teamInfo.id}` },
-        loadSession
-      )
-      .subscribe();
-    return () => {
-      void client.removeChannel(channel);
-    };
+    return undefined;
   }, [user, teamInfo, activeCase, page, useLocalBackend]);
 
   const invoke = useCallback(
@@ -928,13 +888,38 @@ export default function App() {
       if (!supabase || localBackendRef.current) {
         return callLocalArena<T>(name, data);
       }
-      const { data: response, error } = await supabase.functions.invoke('arena', {
+      if (isSupabaseInCooldown()) {
+        if (await activateLocalBackend()) {
+          return callLocalArena<T>(name, data);
+        }
+        throw new Error('Database is temporarily busy. Please try again in a few seconds.');
+      }
+
+      const invokePromise = supabase.functions.invoke('arena', {
         body: {
           action: name,
           ...(adminToken ? { adminToken } : {}),
           ...data,
         },
       });
+      const timeoutPromise = new Promise<{
+        data: null;
+        error: { name: string; message: string; context?: Response };
+      }>((resolve) => {
+        window.setTimeout(
+          () =>
+            resolve({
+              data: null,
+              error: {
+                name: 'FunctionsFetchError',
+                message: 'Failed to send a request to the Edge Function (timed out)',
+              },
+            }),
+          3500
+        );
+      });
+
+      const { data: response, error } = await Promise.race([invokePromise, timeoutPromise]);
       if (error) {
         const errorContext = (error as { context?: Response }).context;
         let parsedBody: { error?: string; code?: string; message?: string } | null = null;
@@ -955,18 +940,27 @@ export default function App() {
           error.name === 'FunctionsFetchError' ||
           error.message.includes('Failed to send a request to the Edge Function') ||
           (errorContext.status === 404 && !parsedBody?.error) ||
+          errorContext.status === 429 ||
+          errorContext.status >= 500 ||
           parsedBody?.code === 'NOT_FOUND' ||
           detailMessage.includes("Could not find the table 'public.teams'");
 
+        if (edgeUnavailable || errorContext?.status === 429) {
+          recordSupabaseFailure(detailMessage || error.message);
+        }
         if (edgeUnavailable && (await activateLocalBackend())) {
           return callLocalArena<T>(name, data);
         }
         throw new Error(detailMessage);
       }
+      resetSupabaseBackoff();
       return response as T;
     },
     [activateLocalBackend, callLocalArena, adminToken]
   );
+
+  const invokeRef = useRef(invoke);
+  invokeRef.current = invoke;
 
   const unlockAdmin = async (passcode: string) => {
     try {
@@ -1004,8 +998,9 @@ export default function App() {
     setNotice('Admin console locked.');
   };
 
+  const currentUserId = user?.id || '';
   useEffect(() => {
-    if (!user) {
+    if (!currentUserId) {
       setTeamInfo(null);
       setTeamLoading(false);
       return undefined;
@@ -1013,7 +1008,8 @@ export default function App() {
     let active = true;
     setTeamLoading(true);
     setTeamEntryError('');
-    invoke<{ teams?: TeamInfo[] }>('listMyTeams')
+    invokeRef
+      .current<{ teams?: TeamInfo[] }>('listMyTeams')
       .then((data) => {
         if (active) setTeamInfo(data?.teams?.[0] || null);
       })
@@ -1028,27 +1024,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [user, invoke]);
-
-  useEffect(() => {
-    if (!supabase || useLocalBackend || !user || !teamInfo) return undefined;
-    const client = supabase;
-    const channel = client.channel(`presence:${teamInfo.id}`, {
-      config: { private: true, presence: { key: user.id } },
-    });
-    channel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        void channel.track({
-          userId: user.id,
-          state: 'online',
-          onlineAt: new Date().toISOString(),
-        });
-      }
-    });
-    return () => {
-      void client.removeChannel(channel);
-    };
-  }, [user, teamInfo, useLocalBackend]);
+  }, [currentUserId]);
 
   useEffect(() => {
     if (!teamInfo) {
@@ -1213,74 +1189,66 @@ export default function App() {
       hintCount,
     };
     localStorage.setItem('arena-progress', JSON.stringify(progress));
-    if (caseFallbackRef.current && teamInfo) {
+    if (teamInfo) {
       const sessions = stored<Record<string, LocalSessionRecord>>('arena-local-sessions', {});
       const key = `${teamInfo.id}:${activeCase.id}`;
       const existing = sessions[key];
       if (existing && !existing.completed) {
         sessions[key] = {
           ...existing,
+          hintsUsed: hintCount,
           progress: { report, selectedEvidence, timelineOrder },
         };
         localStorage.setItem('arena-local-sessions', JSON.stringify(sessions));
       }
-      return undefined;
     }
-    if (!sessionReady || !user || result) return undefined;
-    const timeout = window.setTimeout(() => {
-      const progressPayload = {
-        caseId: activeCase.id,
-        teamId: teamInfo?.id || null,
-        report,
-        selectedEvidence,
-        timelineOrder,
-      };
-      if (serverCaseModeRef.current) {
-        void callLocalArena('saveInvestigationProgress', progressPayload).catch(() => {});
-      } else {
-        void invoke('saveInvestigationProgress', progressPayload).catch(() => {});
-      }
-    }, 350);
-    return () => window.clearTimeout(timeout);
-  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, sessionReady, user, teamInfo, result, invoke, callLocalArena]);
+    return undefined;
+  }, [activeCase, report, selectedEvidence, timelineOrder, hintCount, teamInfo]);
 
   useEffect(() => {
-    if (!user || !teamInfo || !supabaseAccessToken) return;
+    if (!user || !teamInfo || !supabaseAccessToken || useLocalBackend || isSupabaseInCooldown()) return;
     const mergedLocalForTeam = {
       ...(localRankings.solo || {}),
       ...(localRankings[teamInfo.id] || {}),
     };
-    if (Object.keys(mergedLocalForTeam).length === 0) return;
-    const syncKey = `${teamInfo.id}:${Object.keys(mergedLocalForTeam).sort().join(',')}`;
+    const remoteCaseScores =
+      leaderboard.find((entry) => entry.teamId === teamInfo.id || entry.id === `team_${teamInfo.id}`)
+        ?.caseScores || {};
+    const pendingCompactScores: Record<string, CaseScore> = {};
+    for (const [cId, scoreItem] of Object.entries(mergedLocalForTeam)) {
+      if (Object.hasOwn(remoteCaseScores, cId)) continue;
+      pendingCompactScores[cId] = {
+        score: scoreItem.score,
+        maxScore: scoreItem.maxScore,
+        sequenceScore: scoreItem.sequenceScore,
+        summaryScore: scoreItem.summaryScore,
+        timelineMatches: scoreItem.timelineMatches,
+        totalTimeline: scoreItem.totalTimeline,
+        hintsUsed: scoreItem.hintsUsed,
+        elapsedSeconds: scoreItem.elapsedSeconds,
+        submittedAt: scoreItem.submittedAt,
+      };
+    }
+    const pendingKeys = Object.keys(pendingCompactScores).sort();
+    if (pendingKeys.length === 0) return;
+
+    const syncKey = `${teamInfo.id}:${pendingKeys.join(',')}`;
     if (syncedLocalTeamsRef.current.has(syncKey)) return;
     syncedLocalTeamsRef.current.add(syncKey);
 
-    const syncAllTargets = async () => {
-      let syncedAny = false;
-      const results = await Promise.allSettled([
-        callLocalArena<{ synced?: boolean }>('syncLocalScores', {
-          teamId: teamInfo.id,
-          caseScores: mergedLocalForTeam,
-        }),
-        invoke<{ synced?: boolean }>('syncLocalScores', {
-          teamId: teamInfo.id,
-          caseScores: mergedLocalForTeam,
-        }),
-      ]);
-      for (const res of results) {
-        if (res.status === 'fulfilled' && res.value?.synced) {
-          syncedAny = true;
+    invoke<{ synced?: boolean }>('syncLocalScores', {
+      teamId: teamInfo.id,
+      caseScores: pendingCompactScores,
+    })
+      .then((res) => {
+        if (res?.synced) {
+          void refreshArenaData();
         }
-      }
-      if (syncedAny) {
-        await refreshArenaData();
-      }
-    };
-
-    void syncAllTargets().catch(() => {
-      syncedLocalTeamsRef.current.delete(syncKey);
-    });
-  }, [user, teamInfo, supabaseAccessToken, localRankings, callLocalArena, invoke, refreshArenaData]);
+      })
+      .catch(() => {
+        syncedLocalTeamsRef.current.delete(syncKey);
+      });
+  }, [user, teamInfo, supabaseAccessToken, useLocalBackend, localRankings, leaderboard, invoke, refreshArenaData]);
 
   useEffect(() => {
     if (!activeCase || result || !hasLiveEvent) return undefined;
@@ -1366,6 +1334,13 @@ export default function App() {
         for (const [cId, cScore] of Object.entries(extraScores)) {
           if (!Object.hasOwn(target.caseScores || {}, cId)) {
             target.caseScores![cId] = cScore;
+          } else {
+            target.caseScores![cId] = {
+              ...cScore,
+              ...target.caseScores![cId],
+              explanations: target.caseScores![cId].explanations ?? cScore.explanations,
+              submittedSummary: target.caseScores![cId].submittedSummary ?? cScore.submittedSummary,
+            };
           }
         }
         const values = Object.values(target.caseScores || {});
@@ -1667,41 +1642,20 @@ export default function App() {
 
   const requestHint = async () => {
     if (!activeCase || hintCount >= activeCase.hints.length || hintBusy) return;
-    if (caseFallbackRef.current) {
+    if (caseFallbackRef.current || (!serverCaseModeRef.current && supabase && !useLocalBackend)) {
       applyLocalHint(activeCase);
       return;
     }
     setHintBusy(true);
     try {
-      const hintPayload = {
+      const response = await callLocalArena<{ hintsUsed: number }>('useInvestigationHint', {
         caseId: activeCase.id,
         teamId: teamInfo?.id || null,
-      };
-      const response = serverCaseModeRef.current
-        ? await callLocalArena<{ hintsUsed: number }>('useInvestigationHint', hintPayload)
-        : await invoke<{ hintsUsed: number }>('useInvestigationHint', hintPayload);
+      });
       setHintCount(response.hintsUsed);
       playSignal(muted, 480);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unable to unlock hint.';
-      if (isMissingRemoteCaseError(msg)) {
-        try {
-          const response = await callLocalArena<{ hintsUsed: number }>('useInvestigationHint', {
-            caseId: activeCase.id,
-            teamId: teamInfo?.id || null,
-          });
-          serverCaseModeRef.current = true;
-          setHintCount(response.hintsUsed);
-          playSignal(muted, 480);
-          return;
-        } catch {
-          // Fall back to local hint if Express server is unreachable.
-        }
-        caseFallbackRef.current = true;
-        applyLocalHint(activeCase);
-      } else {
-        setNotice(msg);
-      }
+    } catch {
+      applyLocalHint(activeCase);
     } finally {
       setHintBusy(false);
     }
@@ -1739,7 +1693,7 @@ export default function App() {
     setSubmissionBusy(true);
     setNotice('');
 
-    const finishWithResult = (scorePayload: CaseScore) => {
+    const finishWithResult = (scorePayload: CaseScore, syncedRemotely = false) => {
       const enriched: CaseScore = {
         ...scorePayload,
         submittedSummary: report.trim() || scorePayload.submittedSummary || '',
@@ -1748,12 +1702,22 @@ export default function App() {
       const nextCompleted = [...new Set([...completed, targetCase.id])];
       localStorage.setItem('arena-completed', JSON.stringify(nextCompleted));
       localStorage.removeItem('arena-progress');
+      if (syncedRemotely && teamInfo?.id) {
+        const existingLocalKeys = Object.keys({
+          ...(localRankings.solo || {}),
+          ...(localRankings[teamInfo.id] || {}),
+          [targetCase.id]: enriched,
+        }).sort();
+        syncedLocalTeamsRef.current.add(`${teamInfo.id}:${existingLocalKeys.join(',')}`);
+      }
+      recordLocalVerdict(targetCase, enriched);
       setResult(enriched);
       if (typeof scorePayload.rank === 'number' && scorePayload.rank > 0) {
         setServerMyRank(scorePayload.rank);
       }
       setSessionReady(false);
       void fetchSharedServerState();
+      void refreshArenaData();
       setNotice(
         isAutoExpired
           ? `Time expired (${targetCase.duration}:00) for "${targetCase.title}". Case closed automatically — review your points and answer summary below.`
@@ -1777,7 +1741,7 @@ export default function App() {
         const response = serverCaseModeRef.current
           ? await callLocalArena<CaseScore>('submitInvestigation', submitPayload)
           : await invoke<CaseScore>('submitInvestigation', submitPayload);
-        finishWithResult(response);
+        finishWithResult(response, true);
         return;
       }
       const fallbackResult = gradeCaseVerdictLocally(
@@ -1794,8 +1758,7 @@ export default function App() {
         ...fallbackResult,
         submittedSummary: report.trim(),
       };
-      recordLocalVerdict(targetCase, storedScore);
-      finishWithResult(storedScore);
+      finishWithResult(storedScore, false);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Submission failed.';
       if (isMissingRemoteCaseError(msg) || isAutoExpired) {
@@ -1803,7 +1766,7 @@ export default function App() {
           const serverResponse = await callLocalArena<CaseScore>('submitInvestigation', submitPayload);
           serverCaseModeRef.current = true;
           caseFallbackRef.current = false;
-          finishWithResult(serverResponse);
+          finishWithResult(serverResponse, true);
           return;
         } catch {
           // Fall back to local grading only if Express server is unreachable.
@@ -1821,8 +1784,7 @@ export default function App() {
             ...fallbackResult,
             submittedSummary: report.trim(),
           };
-          recordLocalVerdict(targetCase, storedScore);
-          finishWithResult(storedScore);
+          finishWithResult(storedScore, false);
           return;
         }
       }
@@ -1873,6 +1835,7 @@ export default function App() {
         accessCode: trimmedCode,
       });
       setTeamInfo(data);
+      void refreshArenaData();
     } catch (error) {
       setTeamEntryError(error instanceof Error ? error.message : 'Unable to register team.');
     } finally {
@@ -1937,12 +1900,33 @@ export default function App() {
       setPage('Home');
       setMobileMenu(false);
       setNotice('');
-      if (supabase) {
-        await supabase.auth.signOut().catch(() => {});
-        const { error } = await supabase.auth.signInAnonymously();
-        if (error) {
-          setTeamEntryError(error.message);
+      if (supabase && !localBackendRef.current) {
+        await Promise.race([
+          supabase.auth.signOut(),
+          new Promise((resolve) => window.setTimeout(resolve, 2000)),
+        ]).catch(() => {});
+        const res = await Promise.race([
+          supabase.auth.signInAnonymously(),
+          new Promise<{ error: Error }>((resolve) =>
+            window.setTimeout(() => resolve({ error: new Error('Anonymous sign-in timed out.') }), 2500)
+          ),
+        ]).catch((err: unknown) => ({
+          error: err instanceof Error ? err : new Error('Anonymous sign-in failed.'),
+        }));
+        if (res.error) {
+          recordSupabaseFailure(res.error);
+          if (await activateLocalBackend()) {
+            const nextLocalId = getOrCreateLocalPlayerId(true);
+            setUser(createLocalUser(nextLocalId));
+            setSupabaseAccessToken('');
+            setTeamEntryError('');
+          } else {
+            setTeamEntryError(res.error.message);
+          }
         }
+      } else {
+        const nextLocalId = getOrCreateLocalPlayerId(true);
+        setUser(createLocalUser(nextLocalId));
       }
     } finally {
       setLogoutBusy(false);
@@ -2024,16 +2008,6 @@ export default function App() {
     scrollPageToTop();
   }, [page, activeCase?.id, result, scrollPageToTop]);
 
-  useEffect(() => {
-    if (!user || !teamInfo) return undefined;
-    if (useLocalBackend && hasLiveEvent) return undefined;
-    const intervalMs = hasLiveEvent ? 15000 : 6000;
-    const poller = window.setInterval(() => {
-      void refreshArenaData();
-    }, intervalMs);
-    return () => window.clearInterval(poller);
-  }, [user, teamInfo, hasLiveEvent, useLocalBackend, refreshArenaData]);
-
   const goTo = (label: PageName) => {
     scrollPageToTop();
     setPage(label);
@@ -2049,6 +2023,7 @@ export default function App() {
         user={user}
         authReady={authReady}
         supabaseConfigured={supabaseConfigured}
+        useLocalBackend={useLocalBackend}
         teamBusy={teamBusy}
         teamLoading={teamLoading}
         teamEntryError={teamEntryError}
@@ -2296,6 +2271,7 @@ export default function App() {
                     configuredGameMinutes={configuredGameMinutes}
                     completedCount={completed.length}
                     setPage={goTo}
+                    onRefreshStatus={() => void refreshArenaData(true)}
                   />
                 )}
                 {page === 'Dashboard' && (
@@ -2310,6 +2286,7 @@ export default function App() {
                     isGameEnded={isGameEnded}
                     openCase={openCase}
                     setPage={goTo}
+                    onRefreshStatus={() => void refreshArenaData(true)}
                   />
                 )}
                 {page === 'Play Investigation' && (
@@ -2326,7 +2303,7 @@ export default function App() {
                     isGameEnded={isGameEnded}
                     admin={admin}
                     setPage={goTo}
-                    onRefreshStatus={() => void refreshArenaData()}
+                    onRefreshStatus={() => void refreshArenaData(true)}
                   />
                 )}
                 {page === 'My History' && (
@@ -2373,6 +2350,7 @@ function TeamRegistration({
   user,
   authReady,
   supabaseConfigured,
+  useLocalBackend,
   teamBusy,
   teamLoading,
   teamEntryError,
@@ -2385,6 +2363,7 @@ function TeamRegistration({
   user: User | null;
   authReady: boolean;
   supabaseConfigured: boolean;
+  useLocalBackend: boolean;
   teamBusy: boolean;
   teamLoading: boolean;
   teamEntryError: string;
@@ -2394,7 +2373,8 @@ function TeamRegistration({
   setAccessCode: (v: string) => void;
   createTeam: (e: FormEvent) => void;
 }) {
-  const unavailable = !user || !authReady || !supabaseConfigured || teamBusy || teamLoading;
+  const unavailable =
+    !user || !authReady || (!supabaseConfigured && !useLocalBackend) || teamBusy || teamLoading;
   return (
     <main className="team-entry-shell">
       <div className="ambient-grid" aria-hidden="true" />
@@ -2420,7 +2400,7 @@ function TeamRegistration({
           </div>
         ) : null}
 
-        {!supabaseConfigured && (
+        {!supabaseConfigured && !useLocalBackend && (
           <div className="setup-callout">
             <LockKeyhole size={17} />
             <span>Connect Supabase and enable Anonymous sign-in to register your team.</span>
@@ -2509,6 +2489,7 @@ function HomeView({
   configuredGameMinutes,
   completedCount,
   setPage,
+  onRefreshStatus,
 }: {
   cases: InvestigationCase[];
   games: GameLobby[];
@@ -2518,6 +2499,7 @@ function HomeView({
   configuredGameMinutes: number;
   completedCount: number;
   setPage: (p: PageName) => void;
+  onRefreshStatus: () => void;
 }) {
   const liveGamesCount = games.filter((game) => game.status === 'live').length;
   const [rulesModalOpen, setRulesModalOpen] = useState(false);
@@ -2840,7 +2822,13 @@ function HomeView({
             <div className="eyebrow">ARENA DISPATCHES</div>
             <h2>Latest intel</h2>
           </div>
-          <Bell size={16} />
+          <div className="rules-header-actions">
+            <button type="button" className="button button-outline" onClick={onRefreshStatus}>
+              <Radio size={15} />
+              <span>Refresh status</span>
+            </button>
+            <Bell size={16} />
+          </div>
         </div>
         {announcements.length ? (
           announcements.map((item) => (
@@ -2886,6 +2874,7 @@ function DashboardView({
   isGameEnded,
   openCase,
   setPage,
+  onRefreshStatus,
 }: {
   teamInfo: TeamInfo;
   teamScore: number;
@@ -2897,6 +2886,7 @@ function DashboardView({
   isGameEnded: boolean;
   openCase: (c: InvestigationCase) => void;
   setPage: (p: PageName) => void;
+  onRefreshStatus: () => void;
 }) {
   const nextCase = caseList.find((gameCase) => !completed.includes(gameCase.id)) || caseList[0];
   return (
@@ -2906,10 +2896,16 @@ function DashboardView({
         title={`${teamInfo.name}'s investigation desk`}
         description="A clear view of your team's investigations, progress, and standing in the arena."
         action={
-          <button className="button button-primary" onClick={() => setPage('Play Investigation')}>
-            <FolderSearch size={15} />
-            <span>Start an investigation</span>
-          </button>
+          <div className="admin-header-actions">
+            <button type="button" className="button button-outline" onClick={onRefreshStatus}>
+              <Radio size={15} />
+              <span>Refresh status</span>
+            </button>
+            <button className="button button-primary" onClick={() => setPage('Play Investigation')}>
+              <FolderSearch size={15} />
+              <span>Start an investigation</span>
+            </button>
+          </div>
         }
       />
       <div className="metric-grid">
@@ -4127,7 +4123,7 @@ function AdminView({
   setNotice: (v: string) => void;
   unlockAdmin: (passcode: string) => Promise<void>;
   lockAdmin: () => void;
-  refreshArenaData: () => Promise<void>;
+  refreshArenaData: (explicit?: boolean) => Promise<void>;
   onNewGameCreated: () => void;
 }) {
   const [announcement, setAnnouncement] = useState({ title: '', message: '' });
@@ -4252,18 +4248,24 @@ function AdminView({
     }
   }, [invoke, handleAdminError, onAdminRankings]);
 
-  const refreshAdminBoard = useCallback(async () => {
-    await Promise.all([loadTeams(), refreshArenaData()]);
+  const refreshAdminBoard = useCallback(async (explicit = false) => {
+    await Promise.all([loadTeams(), refreshArenaData(explicit)]);
   }, [loadTeams, refreshArenaData]);
 
+  const refreshAdminBoardRef = useRef(refreshAdminBoard);
+  refreshAdminBoardRef.current = refreshAdminBoard;
+  const adminInitialLoadedRef = useRef(false);
+
   useEffect(() => {
-    if (!admin) return undefined;
-    void refreshAdminBoard();
-    const timer = window.setInterval(() => {
-      void loadTeams();
-    }, 6000);
-    return () => window.clearInterval(timer);
-  }, [admin, registeredCount, leaderboard.length, loadTeams, refreshAdminBoard]);
+    if (!admin) {
+      adminInitialLoadedRef.current = false;
+      return undefined;
+    }
+    if (adminInitialLoadedRef.current) return undefined;
+    adminInitialLoadedRef.current = true;
+    void refreshAdminBoardRef.current(false);
+    return undefined;
+  }, [admin]);
 
   const handleUnlock = async (event: FormEvent) => {
     event.preventDefault();
@@ -4299,7 +4301,6 @@ function AdminView({
       const created = await invoke<GameLobby>('adminCreateGame', {
         name: gameTitle,
         caseId: cases[0].id,
-        inviteCode: '',
         durationMinutes: mins,
       });
       await invoke('adminSetGameStatus', {
@@ -4602,12 +4603,12 @@ function AdminView({
             />
           </label>
           <div className="admin-leaderboard-actions">
-            <span className="live-updating">{teamsSyncing ? 'SYNCING...' : 'LIVE UPDATING'}</span>
+            <span className="live-updating">{teamsSyncing ? 'SYNCING...' : 'MANUAL SYNC'}</span>
             <button
               type="button"
               className="button button-outline"
               disabled={teamsSyncing}
-              onClick={() => void refreshAdminBoard()}
+              onClick={() => void refreshAdminBoard(true)}
             >
               <Radio size={15} />
               <span>Refresh</span>

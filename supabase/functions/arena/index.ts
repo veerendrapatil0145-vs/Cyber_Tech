@@ -8,6 +8,18 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-arena-admin',
 };
 
+const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
+const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
+const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+
+const authClient = createClient(supabaseUrl, anonKey, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
 async function signAdminToken(secret: string): Promise<string> {
   const exp = Date.now() + 24 * 60 * 60 * 1000;
   const payload = String(exp);
@@ -566,20 +578,32 @@ function evaluateAnswerSummary(caseId: string, report: string, maxPoints = 50) {
   };
 }
 
-function generateInviteCode(length = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let out = '';
-  for (let i = 0; i < length; i += 1) {
-    out += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return out;
-}
-
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
+}
+
+function compactCaseScores(raw: unknown): Record<string, Record<string, unknown>> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [cId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const item = value as Record<string, unknown>;
+    out[cId] = {
+      score: item.score ?? 0,
+      maxScore: item.maxScore,
+      sequenceScore: item.sequenceScore,
+      summaryScore: item.summaryScore,
+      timelineMatches: item.timelineMatches ?? 0,
+      totalTimeline: item.totalTimeline ?? 0,
+      hintsUsed: item.hintsUsed ?? 0,
+      elapsedSeconds: item.elapsedSeconds ?? 0,
+      submittedAt: item.submittedAt,
+    };
+  }
+  return out;
 }
 
 Deno.serve(async (req) => {
@@ -588,24 +612,21 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const authHeader = req.headers.get('Authorization') || '';
+    const jwt = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!jwt) {
+      return json({ error: 'Authentication required.' }, 401);
+    }
 
-    const userClient = createClient(supabaseUrl, anonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
     const {
       data: { user },
       error: authError,
-    } = await userClient.auth.getUser();
+    } = await authClient.auth.getUser(jwt);
 
     if (authError || !user) {
       return json({ error: 'Authentication required.' }, 401);
     }
 
-    const adminClient = createClient(supabaseUrl, serviceRoleKey);
     const body = await req.json();
     const { action, ...payload } = body || {};
 
@@ -620,25 +641,28 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'listMyTeams') {
-      const [{ data, error }, { data: orderedTeams }] = await Promise.all([
-        adminClient
-          .from('teams')
-          .select('id, name, invite_code')
-          .contains('member_ids', [user.id]),
-        adminClient
-          .from('teams')
-          .select('id')
-          .order('created_at', { ascending: true }),
-      ]);
+      const { data, error } = await adminClient
+        .from('teams')
+        .select('id, name, created_at')
+        .contains('member_ids', [user.id])
+        .limit(1);
       if (error) return json({ error: error.message }, 400);
-      const slotById = new Map((orderedTeams || []).map((row, idx) => [row.id, idx]));
+      if (!data || data.length === 0) {
+        return json({ teams: [] });
+      }
+      const team = data[0];
+      const { count } = await adminClient
+        .from('teams')
+        .select('id', { count: 'exact', head: true })
+        .lt('created_at', team.created_at);
       return json({
-        teams: (data || []).map((t) => ({
-          id: t.id,
-          name: t.name,
-          inviteCode: t.invite_code,
-          slot: slotById.get(t.id) ?? 0,
-        })),
+        teams: [
+          {
+            id: team.id,
+            name: team.name,
+            slot: count ?? 0,
+          },
+        ],
       });
     }
 
@@ -655,31 +679,30 @@ Deno.serve(async (req) => {
       if (name.length < 2 || name.length > 30) {
         return json({ error: 'Team name must be between 2 and 30 characters.' }, 400);
       }
-      const inviteCode = generateInviteCode(6);
       const { data: team, error } = await adminClient
         .from('teams')
         .insert({
           name,
-          invite_code: inviteCode,
           owner_id: user.id,
           member_ids: [user.id],
         })
-        .select('id, name, invite_code')
+        .select('id, name, created_at')
         .single();
       if (error) return json({ error: error.message }, 400);
 
-      const [{ count }, { data: orderedTeams }] = await Promise.all([
+      const [{ count: totalCount }, { count: beforeCount }] = await Promise.all([
         adminClient.from('teams').select('id', { count: 'exact', head: true }),
-        adminClient.from('teams').select('id').order('created_at', { ascending: true }),
+        adminClient
+          .from('teams')
+          .select('id', { count: 'exact', head: true })
+          .lt('created_at', team.created_at),
       ]);
-      await adminClient.from('stats').upsert({ id: 1, registered_teams: count ?? 1 });
-      const slotIndex = (orderedTeams || []).findIndex((row) => row.id === team.id);
+      await adminClient.from('stats').upsert({ id: 1, registered_teams: totalCount ?? 1 });
 
       return json({
         id: team.id,
         name: team.name,
-        inviteCode: team.invite_code,
-        slot: slotIndex >= 0 ? slotIndex : Math.max(0, (count ?? 1) - 1),
+        slot: beforeCount ?? Math.max(0, (totalCount ?? 1) - 1),
       });
     }
 
@@ -694,7 +717,7 @@ Deno.serve(async (req) => {
       const teamId = String(payload.teamId || '');
       let query = adminClient
         .from('teams')
-        .select('*')
+        .select('id, member_ids')
         .contains('member_ids', [user.id]);
       if (teamId) {
         query = query.eq('id', teamId);
@@ -736,7 +759,7 @@ Deno.serve(async (req) => {
 
       const { data: existing } = await adminClient
         .from('sessions')
-        .select('*')
+        .select('progress, hints_used, started_at')
         .eq('team_id', teamId)
         .eq('case_id', caseId)
         .maybeSingle();
@@ -761,37 +784,13 @@ Deno.serve(async (req) => {
           last_writer: user.id,
           progress: { report: '', selectedEvidence: [], timelineOrder: [] },
         })
-        .select('*')
+        .select('progress')
         .single();
       if (error) return json({ error: error.message }, 400);
       return json({ progress: created.progress, hintsUsed: 0, elapsedSeconds: 0 });
     }
 
     if (action === 'saveInvestigationProgress') {
-      const caseId = String(payload.caseId || '');
-      const teamId = String(payload.teamId || '');
-      const { data: team } = await adminClient
-        .from('teams')
-        .select('id')
-        .eq('id', teamId)
-        .contains('member_ids', [user.id])
-        .maybeSingle();
-      if (!team) return json({ error: 'Team membership required.' }, 403);
-      await adminClient
-        .from('sessions')
-        .update({
-          last_writer: user.id,
-          progress: {
-            report: String(payload.report || '').slice(0, 500),
-            selectedEvidence: Array.isArray(payload.selectedEvidence)
-              ? payload.selectedEvidence
-              : [],
-            timelineOrder: Array.isArray(payload.timelineOrder) ? payload.timelineOrder : [],
-          },
-        })
-        .eq('team_id', teamId)
-        .eq('case_id', caseId)
-        .eq('completed', false);
       return json({ ok: true });
     }
 
@@ -807,7 +806,7 @@ Deno.serve(async (req) => {
       if (!team) return json({ error: 'Team membership required.' }, 403);
       const { data: session } = await adminClient
         .from('sessions')
-        .select('*')
+        .select('id, hints_used')
         .eq('team_id', teamId)
         .eq('case_id', caseId)
         .maybeSingle();
@@ -829,7 +828,7 @@ Deno.serve(async (req) => {
 
       const { data: team } = await adminClient
         .from('teams')
-        .select('*')
+        .select('id, name, owner_id, member_ids')
         .eq('id', teamId)
         .contains('member_ids', [user.id])
         .maybeSingle();
@@ -837,12 +836,16 @@ Deno.serve(async (req) => {
 
       const { data: session } = await adminClient
         .from('sessions')
-        .select('*')
+        .select('id, hints_used, started_at')
         .eq('team_id', teamId)
         .eq('case_id', caseId)
         .maybeSingle();
 
-      const hintsUsed = session?.hints_used || 0;
+      const clientHints =
+        typeof payload.hintsUsed === 'number' && Number.isFinite(payload.hintsUsed)
+          ? Math.max(0, Math.min(key.maxHints ?? 2, Math.round(payload.hintsUsed)))
+          : 0;
+      const hintsUsed = Math.max(session?.hints_used || 0, clientHints);
       const elapsedSeconds = session
         ? Math.max(1, Math.floor((Date.now() - new Date(session.started_at).getTime()) / 1000))
         : 60;
@@ -899,7 +902,7 @@ Deno.serve(async (req) => {
         })),
       ];
 
-      const caseResult = {
+      const storedCaseRecord = {
         score: finalScore,
         maxScore,
         sequenceScore,
@@ -909,18 +912,17 @@ Deno.serve(async (req) => {
         hintsUsed,
         elapsedSeconds,
         submittedAt: new Date().toISOString(),
-        explanations,
       };
 
       const { data: existingRank } = await adminClient
         .from('rankings')
-        .select('*')
+        .select('case_scores')
         .eq('team_id', team.id)
         .maybeSingle();
 
       const caseScores = {
-        ...(existingRank?.case_scores || {}),
-        [caseId]: caseResult,
+        ...compactCaseScores(existingRank?.case_scores),
+        [caseId]: storedCaseRecord,
       };
       const totalScore = Math.round(
         Object.values(caseScores).reduce(
@@ -961,7 +963,8 @@ Deno.serve(async (req) => {
         : `Answer summary ${summaryEval.summaryScore}/${summaryMax} (No timeline required for this case).`;
 
       return json({
-        ...caseResult,
+        ...storedCaseRecord,
+        explanations,
         message,
       });
     }
@@ -970,7 +973,7 @@ Deno.serve(async (req) => {
       const teamId = String(payload.teamId || '');
       const { data: team } = await adminClient
         .from('teams')
-        .select('*')
+        .select('id, name, owner_id, member_ids')
         .eq('id', teamId)
         .contains('member_ids', [user.id])
         .maybeSingle();
@@ -983,11 +986,11 @@ Deno.serve(async (req) => {
 
       const { data: existingRank } = await adminClient
         .from('rankings')
-        .select('*')
+        .select('case_scores')
         .eq('team_id', team.id)
         .maybeSingle();
 
-      const caseScores: Record<string, unknown> = { ...(existingRank?.case_scores || {}) };
+      const caseScores: Record<string, unknown> = compactCaseScores(existingRank?.case_scores);
       let changed = false;
 
       for (const [caseId, item] of Object.entries(incoming)) {
@@ -1020,7 +1023,6 @@ Deno.serve(async (req) => {
             typeof item.totalTimeline === 'number'
               ? item.totalTimeline
               : caseAnswerKeys[caseId].correctTimeline.length,
-          explanations: Array.isArray(item.explanations) ? item.explanations : [],
         };
         changed = true;
       }
@@ -1060,42 +1062,7 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'joinGame') {
-      const inviteCode = String(payload.inviteCode || '').trim().toUpperCase();
-      const { data: game } = await adminClient
-        .from('games')
-        .select('*')
-        .eq('invite_code', inviteCode)
-        .maybeSingle();
-      if (!game) return json({ error: 'No event lobby matches that code.' }, 404);
-      if (game.status === 'ended') {
-        return json({ error: 'This event lobby has already ended.' }, 400);
-      }
-      const { data: myTeam } = await adminClient
-        .from('teams')
-        .select('id')
-        .contains('member_ids', [user.id])
-        .maybeSingle();
-      if (myTeam) {
-        const existingParticipants = Array.isArray(game.participant_team_ids)
-          ? game.participant_team_ids
-          : [];
-        if (!existingParticipants.includes(myTeam.id)) {
-          const nextParticipants = [...existingParticipants, myTeam.id];
-          await adminClient
-            .from('games')
-            .update({
-              participant_team_ids: nextParticipants,
-              participant_count: nextParticipants.length,
-            })
-            .eq('id', game.id);
-        }
-      }
-      return json({
-        id: game.id,
-        name: game.name || game.title,
-        caseId: game.case_id,
-        status: game.status,
-      });
+      return json({ error: 'Invite codes are disabled.' }, 403);
     }
 
     const tokenAdmin = await verifyAdminToken(
@@ -1110,24 +1077,20 @@ Deno.serve(async (req) => {
     if (action === 'adminCreateGame') {
       const name = String(payload.name || '').trim();
       if (!name) return json({ error: 'Event name is required.' }, 400);
-      const inviteCode =
-        String(payload.inviteCode || '').trim().toUpperCase() || generateInviteCode(6);
       const { data: game, error } = await adminClient
         .from('games')
         .insert({
           name,
           case_id: String(payload.caseId || 'case-01'),
-          invite_code: inviteCode,
           status: 'open',
         })
-        .select('*')
+        .select('id, name, case_id, status, participant_count, created_at')
         .single();
       if (error) return json({ error: error.message }, 400);
       return json({
         id: game.id,
         name: game.name,
         caseId: game.case_id,
-        inviteCode: game.invite_code,
         status: game.status,
         participantCount: game.participant_count ?? 0,
         createdAt: game.created_at,
@@ -1158,8 +1121,16 @@ Deno.serve(async (req) => {
 
     if (action === 'adminListTeams') {
       const [teamsRes, rankingsRes] = await Promise.all([
-        adminClient.from('teams').select('id, name, member_ids'),
-        adminClient.from('rankings').select('*').order('score', { ascending: false }).limit(500),
+        adminClient
+          .from('teams')
+          .select('id, name, member_ids')
+          .order('created_at', { ascending: true })
+          .limit(500),
+        adminClient
+          .from('rankings')
+          .select('id, team_id, team_name, mode, score, elapsed_seconds, case_scores')
+          .order('score', { ascending: false })
+          .limit(200),
       ]);
       if (teamsRes.error) return json({ error: teamsRes.error.message }, 400);
       return json({
@@ -1168,7 +1139,12 @@ Deno.serve(async (req) => {
           name: t.name,
           memberCount: Array.isArray(t.member_ids) ? t.member_ids.length : 0,
         })),
-        rankings: rankingsRes.error ? [] : rankingsRes.data || [],
+        rankings: rankingsRes.error
+          ? []
+          : (rankingsRes.data || []).map((row) => ({
+              ...row,
+              case_scores: compactCaseScores(row.case_scores),
+            })),
       });
     }
 
