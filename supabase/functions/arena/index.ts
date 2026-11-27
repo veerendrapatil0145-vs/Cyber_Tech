@@ -1,7 +1,9 @@
-// Supabase Edge Function: arena
+// Supabase Edge Function: arena (Hybrid: Supabase Auth + Neon PostgreSQL)
 // Deploy with: supabase functions deploy arena --no-verify-jwt=false
+// Required secret: supabase secrets set NEON_DATABASE_URL="postgresql://..."
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { neon } from 'https://esm.sh/@neondatabase/serverless@0.10.4';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -10,15 +12,16 @@ const corsHeaders = {
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
 const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
-const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+const adminTokenSecret =
+  Deno.env.get('ADMIN_TOKEN_SECRET') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
 const authClient = createClient(supabaseUrl, anonKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const adminClient = createClient(supabaseUrl, serviceRoleKey, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+const sql = neon(Deno.env.get('NEON_DATABASE_URL')!);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function signAdminToken(secret: string): Promise<string> {
   const exp = Date.now() + 24 * 60 * 60 * 1000;
@@ -636,31 +639,35 @@ Deno.serve(async (req) => {
       if (!passcode || passcode !== expectedPasscode) {
         return json({ error: 'Invalid organizer passcode.' }, 403);
       }
-      const adminToken = await signAdminToken(serviceRoleKey);
+      if (!adminTokenSecret) {
+        return json({ error: 'Admin token secret is not configured.' }, 500);
+      }
+      const adminToken = await signAdminToken(adminTokenSecret);
       return json({ adminToken, isAdmin: true });
     }
 
     if (action === 'listMyTeams') {
-      const { data, error } = await adminClient
-        .from('teams')
-        .select('id, name, created_at')
-        .contains('member_ids', [user.id])
-        .limit(1);
-      if (error) return json({ error: error.message }, 400);
-      if (!data || data.length === 0) {
+      const teamRows = await sql`
+        SELECT id, name, created_at
+        FROM public.teams
+        WHERE ${user.id}::uuid = ANY(member_ids)
+        LIMIT 1
+      `;
+      if (teamRows.length === 0) {
         return json({ teams: [] });
       }
-      const team = data[0];
-      const { count } = await adminClient
-        .from('teams')
-        .select('id', { count: 'exact', head: true })
-        .lt('created_at', team.created_at);
+      const team = teamRows[0];
+      const slotRows = await sql`
+        SELECT COUNT(*)::int AS slot
+        FROM public.teams
+        WHERE created_at < ${team.created_at}
+      `;
       return json({
         teams: [
           {
             id: team.id,
             name: team.name,
-            slot: count ?? 0,
+            slot: slotRows[0]?.slot ?? 0,
           },
         ],
       });
@@ -679,30 +686,43 @@ Deno.serve(async (req) => {
       if (name.length < 2 || name.length > 30) {
         return json({ error: 'Team name must be between 2 and 30 characters.' }, 400);
       }
-      const { data: team, error } = await adminClient
-        .from('teams')
-        .insert({
-          name,
-          owner_id: user.id,
-          member_ids: [user.id],
-        })
-        .select('id, name, created_at')
-        .single();
-      if (error) return json({ error: error.message }, 400);
 
-      const [{ count: totalCount }, { count: beforeCount }] = await Promise.all([
-        adminClient.from('teams').select('id', { count: 'exact', head: true }),
-        adminClient
-          .from('teams')
-          .select('id', { count: 'exact', head: true })
-          .lt('created_at', team.created_at),
+      let team: Record<string, unknown>;
+      try {
+        const inserted = await sql`
+          INSERT INTO public.teams (name, owner_id, member_ids)
+          VALUES (${name}, ${user.id}::uuid, ARRAY[${user.id}::uuid])
+          RETURNING id, name, created_at
+        `;
+        if (!inserted[0]) {
+          return json({ error: 'Unable to create team.' }, 400);
+        }
+        team = inserted[0];
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unable to create team.';
+        if (msg.toLowerCase().includes('duplicate key') || msg.toLowerCase().includes('unique')) {
+          return json({ error: 'Team name is already registered. Choose a different team name.' }, 400);
+        }
+        return json({ error: msg }, 400);
+      }
+
+      const [totalRows, beforeRows] = await Promise.all([
+        sql`SELECT COUNT(*)::int AS count FROM public.teams`,
+        sql`SELECT COUNT(*)::int AS count FROM public.teams WHERE created_at < ${team.created_at}`,
       ]);
-      await adminClient.from('stats').upsert({ id: 1, registered_teams: totalCount ?? 1 });
+      const totalCount = Number(totalRows[0]?.count ?? 1);
+      const beforeCount = Number(beforeRows[0]?.count ?? Math.max(0, totalCount - 1));
+
+      await sql`
+        INSERT INTO public.stats (id, registered_teams)
+        VALUES (1, ${totalCount})
+        ON CONFLICT (id) DO UPDATE SET registered_teams = EXCLUDED.registered_teams
+      `;
 
       return json({
         id: team.id,
         name: team.name,
-        slot: beforeCount ?? Math.max(0, (totalCount ?? 1) - 1),
+        slot: beforeCount,
       });
     }
 
@@ -715,32 +735,45 @@ Deno.serve(async (req) => {
 
     if (action === 'leaveTeam') {
       const teamId = String(payload.teamId || '');
-      let query = adminClient
-        .from('teams')
-        .select('id, member_ids')
-        .contains('member_ids', [user.id]);
-      if (teamId) {
-        query = query.eq('id', teamId);
+      if (teamId && !UUID_RE.test(teamId)) {
+        return json({ left: true });
       }
-      const { data: team } = await query.maybeSingle();
+      const teamRows = teamId
+        ? await sql`
+            SELECT id, member_ids
+            FROM public.teams
+            WHERE id = ${teamId}::uuid AND ${user.id}::uuid = ANY(member_ids)
+            LIMIT 1
+          `
+        : await sql`
+            SELECT id, member_ids
+            FROM public.teams
+            WHERE ${user.id}::uuid = ANY(member_ids)
+            LIMIT 1
+          `;
+      const team = teamRows[0];
       if (!team) {
         return json({ left: true });
       }
-      const members = Array.isArray(team.member_ids) ? team.member_ids : [];
-      const nextMembers = members.filter((id: string) => id !== user.id);
+
+      const members = Array.isArray(team.member_ids) ? (team.member_ids as string[]) : [];
+      const nextMembers = members.filter((id) => id !== user.id);
+
       if (nextMembers.length === 0) {
-        await adminClient.from('teams').delete().eq('id', team.id);
+        await sql`DELETE FROM public.teams WHERE id = ${team.id}::uuid`;
       } else {
-        await adminClient.from('teams').update({ member_ids: nextMembers }).eq('id', team.id);
-        await adminClient
-          .from('rankings')
-          .update({ member_ids: nextMembers })
-          .eq('team_id', team.id);
+        await Promise.all([
+          sql`UPDATE public.teams SET member_ids = ${nextMembers}::uuid[] WHERE id = ${team.id}::uuid`,
+          sql`UPDATE public.rankings SET member_ids = ${nextMembers}::uuid[] WHERE team_id = ${team.id}::uuid`,
+        ]);
       }
-      const { count } = await adminClient
-        .from('teams')
-        .select('id', { count: 'exact', head: true });
-      await adminClient.from('stats').upsert({ id: 1, registered_teams: count ?? 0 });
+
+      const countRows = await sql`SELECT COUNT(*)::int AS count FROM public.teams`;
+      await sql`
+        INSERT INTO public.stats (id, registered_teams)
+        VALUES (1, ${Number(countRows[0]?.count ?? 0)})
+        ON CONFLICT (id) DO UPDATE SET registered_teams = EXCLUDED.registered_teams
+      `;
       return json({ left: true });
     }
 
@@ -748,46 +781,62 @@ Deno.serve(async (req) => {
       const caseId = String(payload.caseId || '');
       const teamId = String(payload.teamId || '');
       if (!caseAnswerKeys[caseId]) return json({ error: 'Case file not found.' }, 404);
+      if (!UUID_RE.test(teamId)) return json({ error: 'Team membership required.' }, 403);
 
-      const { data: team } = await adminClient
-        .from('teams')
-        .select('id')
-        .eq('id', teamId)
-        .contains('member_ids', [user.id])
-        .maybeSingle();
-      if (!team) return json({ error: 'Team membership required.' }, 403);
+      const teamRows = await sql`
+        SELECT id
+        FROM public.teams
+        WHERE id = ${teamId}::uuid AND ${user.id}::uuid = ANY(member_ids)
+        LIMIT 1
+      `;
+      if (teamRows.length === 0) return json({ error: 'Team membership required.' }, 403);
 
-      const { data: existing } = await adminClient
-        .from('sessions')
-        .select('progress, hints_used, started_at')
-        .eq('team_id', teamId)
-        .eq('case_id', caseId)
-        .maybeSingle();
-
-      if (existing) {
+      const existingRows = await sql`
+        SELECT progress, hints_used, started_at
+        FROM public.sessions
+        WHERE team_id = ${teamId}::uuid AND case_id = ${caseId}
+        LIMIT 1
+      `;
+      if (existingRows[0]) {
+        const existing = existingRows[0];
         const elapsedSeconds = Math.max(
           0,
-          Math.floor((Date.now() - new Date(existing.started_at).getTime()) / 1000)
+          Math.floor((Date.now() - new Date(String(existing.started_at)).getTime()) / 1000)
         );
         return json({
           progress: existing.progress || {},
-          hintsUsed: existing.hints_used || 0,
+          hintsUsed: Number(existing.hints_used || 0),
           elapsedSeconds,
         });
       }
 
-      const { data: created, error } = await adminClient
-        .from('sessions')
-        .insert({
-          team_id: teamId,
-          case_id: caseId,
-          last_writer: user.id,
-          progress: { report: '', selectedEvidence: [], timelineOrder: [] },
-        })
-        .select('progress')
-        .single();
-      if (error) return json({ error: error.message }, 400);
-      return json({ progress: created.progress, hintsUsed: 0, elapsedSeconds: 0 });
+      const initialProgress = { report: '', selectedEvidence: [], timelineOrder: [] };
+      const createdRows = await sql`
+        INSERT INTO public.sessions (team_id, case_id, last_writer, progress)
+        VALUES (${teamId}::uuid, ${caseId}, ${user.id}::uuid, ${JSON.stringify(initialProgress)}::jsonb)
+        ON CONFLICT (team_id, case_id) DO NOTHING
+        RETURNING progress
+      `;
+      if (createdRows[0]) {
+        return json({ progress: createdRows[0].progress, hintsUsed: 0, elapsedSeconds: 0 });
+      }
+
+      const retryRows = await sql`
+        SELECT progress, hints_used, started_at
+        FROM public.sessions
+        WHERE team_id = ${teamId}::uuid AND case_id = ${caseId}
+        LIMIT 1
+      `;
+      const retry = retryRows[0];
+      if (!retry) return json({ error: 'Unable to start investigation.' }, 400);
+      return json({
+        progress: retry.progress || initialProgress,
+        hintsUsed: Number(retry.hints_used || 0),
+        elapsedSeconds: Math.max(
+          0,
+          Math.floor((Date.now() - new Date(String(retry.started_at)).getTime()) / 1000)
+        ),
+      });
     }
 
     if (action === 'saveInvestigationProgress') {
@@ -797,26 +846,32 @@ Deno.serve(async (req) => {
     if (action === 'useInvestigationHint') {
       const caseId = String(payload.caseId || '');
       const teamId = String(payload.teamId || '');
-      const { data: team } = await adminClient
-        .from('teams')
-        .select('id')
-        .eq('id', teamId)
-        .contains('member_ids', [user.id])
-        .maybeSingle();
-      if (!team) return json({ error: 'Team membership required.' }, 403);
-      const { data: session } = await adminClient
-        .from('sessions')
-        .select('id, hints_used')
-        .eq('team_id', teamId)
-        .eq('case_id', caseId)
-        .maybeSingle();
+      if (!UUID_RE.test(teamId)) return json({ error: 'Team membership required.' }, 403);
+
+      const teamRows = await sql`
+        SELECT id
+        FROM public.teams
+        WHERE id = ${teamId}::uuid AND ${user.id}::uuid = ANY(member_ids)
+        LIMIT 1
+      `;
+      if (teamRows.length === 0) return json({ error: 'Team membership required.' }, 403);
+
+      const sessionRows = await sql`
+        SELECT id, hints_used
+        FROM public.sessions
+        WHERE team_id = ${teamId}::uuid AND case_id = ${caseId}
+        LIMIT 1
+      `;
+      const session = sessionRows[0];
       if (!session) return json({ error: 'Start the investigation first.' }, 404);
+
       const maxHints = caseAnswerKeys[caseId]?.maxHints ?? 2;
-      const nextHints = Math.min(maxHints, (session.hints_used || 0) + 1);
-      await adminClient
-        .from('sessions')
-        .update({ hints_used: nextHints, last_writer: user.id })
-        .eq('id', session.id);
+      const nextHints = Math.min(maxHints, Number(session.hints_used || 0) + 1);
+      await sql`
+        UPDATE public.sessions
+        SET hints_used = ${nextHints}, last_writer = ${user.id}::uuid
+        WHERE id = ${session.id}::uuid
+      `;
       return json({ hintsUsed: nextHints });
     }
 
@@ -825,29 +880,32 @@ Deno.serve(async (req) => {
       const teamId = String(payload.teamId || '');
       const key = caseAnswerKeys[caseId];
       if (!key) return json({ error: 'Case answer key not found.' }, 404);
+      if (!UUID_RE.test(teamId)) return json({ error: 'Team membership required.' }, 403);
 
-      const { data: team } = await adminClient
-        .from('teams')
-        .select('id, name, owner_id, member_ids')
-        .eq('id', teamId)
-        .contains('member_ids', [user.id])
-        .maybeSingle();
+      const teamRows = await sql`
+        SELECT id, name, owner_id, member_ids
+        FROM public.teams
+        WHERE id = ${teamId}::uuid AND ${user.id}::uuid = ANY(member_ids)
+        LIMIT 1
+      `;
+      const team = teamRows[0];
       if (!team) return json({ error: 'Team membership required.' }, 403);
 
-      const { data: session } = await adminClient
-        .from('sessions')
-        .select('id, hints_used, started_at')
-        .eq('team_id', teamId)
-        .eq('case_id', caseId)
-        .maybeSingle();
+      const sessionRows = await sql`
+        SELECT id, hints_used, started_at
+        FROM public.sessions
+        WHERE team_id = ${teamId}::uuid AND case_id = ${caseId}
+        LIMIT 1
+      `;
+      const session = sessionRows[0];
 
       const clientHints =
         typeof payload.hintsUsed === 'number' && Number.isFinite(payload.hintsUsed)
           ? Math.max(0, Math.min(key.maxHints ?? 2, Math.round(payload.hintsUsed)))
           : 0;
-      const hintsUsed = Math.max(session?.hints_used || 0, clientHints);
+      const hintsUsed = Math.max(Number(session?.hints_used || 0), clientHints);
       const elapsedSeconds = session
-        ? Math.max(1, Math.floor((Date.now() - new Date(session.started_at).getTime()) / 1000))
+        ? Math.max(1, Math.floor((Date.now() - new Date(String(session.started_at)).getTime()) / 1000))
         : 60;
       const timelineOrder = Array.isArray(payload.timelineOrder) ? payload.timelineOrder : [];
       const reportText = typeof payload.report === 'string' ? payload.report : '';
@@ -914,11 +972,13 @@ Deno.serve(async (req) => {
         submittedAt: new Date().toISOString(),
       };
 
-      const { data: existingRank } = await adminClient
-        .from('rankings')
-        .select('case_scores')
-        .eq('team_id', team.id)
-        .maybeSingle();
+      const existingRankRows = await sql`
+        SELECT case_scores
+        FROM public.rankings
+        WHERE team_id = ${team.id}::uuid
+        LIMIT 1
+      `;
+      const existingRank = existingRankRows[0];
 
       const caseScores = {
         ...compactCaseScores(existingRank?.case_scores),
@@ -937,25 +997,41 @@ Deno.serve(async (req) => {
           0
         )
       );
+      const memberIds = Array.isArray(team.member_ids) ? (team.member_ids as string[]) : [user.id];
+      const ownerId = team.owner_id ? String(team.owner_id) : null;
 
-      const { error: rankError } = await adminClient.from('rankings').upsert(
-        {
-          team_id: team.id,
-          team_name: team.name,
-          owner_id: team.owner_id,
-          member_ids: team.member_ids,
-          mode: 'Team',
-          score: totalScore,
-          elapsed_seconds: totalElapsed,
-          case_scores: caseScores,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'team_id' }
-      );
-      if (rankError) return json({ error: rankError.message }, 400);
+      await sql`
+        INSERT INTO public.rankings (
+          team_id, team_name, owner_id, member_ids, mode, score, elapsed_seconds, case_scores, updated_at
+        )
+        VALUES (
+          ${team.id}::uuid,
+          ${String(team.name || 'Team')},
+          ${ownerId}::uuid,
+          ${memberIds}::uuid[],
+          'Team',
+          ${totalScore},
+          ${totalElapsed},
+          ${JSON.stringify(caseScores)}::jsonb,
+          NOW()
+        )
+        ON CONFLICT (team_id) DO UPDATE SET
+          team_name = EXCLUDED.team_name,
+          owner_id = EXCLUDED.owner_id,
+          member_ids = EXCLUDED.member_ids,
+          mode = EXCLUDED.mode,
+          score = EXCLUDED.score,
+          elapsed_seconds = EXCLUDED.elapsed_seconds,
+          case_scores = EXCLUDED.case_scores,
+          updated_at = EXCLUDED.updated_at
+      `;
 
       if (session) {
-        await adminClient.from('sessions').update({ completed: true }).eq('id', session.id);
+        await sql`
+          UPDATE public.sessions
+          SET completed = true
+          WHERE id = ${session.id}::uuid
+        `;
       }
 
       const message = hasTimeline
@@ -971,12 +1047,15 @@ Deno.serve(async (req) => {
 
     if (action === 'syncLocalScores') {
       const teamId = String(payload.teamId || '');
-      const { data: team } = await adminClient
-        .from('teams')
-        .select('id, name, owner_id, member_ids')
-        .eq('id', teamId)
-        .contains('member_ids', [user.id])
-        .maybeSingle();
+      if (!UUID_RE.test(teamId)) return json({ error: 'Team membership required.' }, 403);
+
+      const teamRows = await sql`
+        SELECT id, name, owner_id, member_ids
+        FROM public.teams
+        WHERE id = ${teamId}::uuid AND ${user.id}::uuid = ANY(member_ids)
+        LIMIT 1
+      `;
+      const team = teamRows[0];
       if (!team) return json({ error: 'Team membership required.' }, 403);
 
       const incoming =
@@ -984,11 +1063,13 @@ Deno.serve(async (req) => {
           ? (payload.caseScores as Record<string, Record<string, unknown>>)
           : {};
 
-      const { data: existingRank } = await adminClient
-        .from('rankings')
-        .select('case_scores')
-        .eq('team_id', team.id)
-        .maybeSingle();
+      const existingRankRows = await sql`
+        SELECT case_scores
+        FROM public.rankings
+        WHERE team_id = ${team.id}::uuid
+        LIMIT 1
+      `;
+      const existingRank = existingRankRows[0];
 
       const caseScores: Record<string, unknown> = compactCaseScores(existingRank?.case_scores);
       let changed = false;
@@ -1041,21 +1122,34 @@ Deno.serve(async (req) => {
             0
           )
         );
-        const { error: rankError } = await adminClient.from('rankings').upsert(
-          {
-            team_id: team.id,
-            team_name: team.name,
-            owner_id: team.owner_id,
-            member_ids: team.member_ids,
-            mode: 'Team',
-            score: totalScore,
-            elapsed_seconds: totalElapsed,
-            case_scores: caseScores,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'team_id' }
-        );
-        if (rankError) return json({ error: rankError.message }, 400);
+        const memberIds = Array.isArray(team.member_ids) ? (team.member_ids as string[]) : [user.id];
+        const ownerId = team.owner_id ? String(team.owner_id) : null;
+
+        await sql`
+          INSERT INTO public.rankings (
+            team_id, team_name, owner_id, member_ids, mode, score, elapsed_seconds, case_scores, updated_at
+          )
+          VALUES (
+            ${team.id}::uuid,
+            ${String(team.name || 'Team')},
+            ${ownerId}::uuid,
+            ${memberIds}::uuid[],
+            'Team',
+            ${totalScore},
+            ${totalElapsed},
+            ${JSON.stringify(caseScores)}::jsonb,
+            NOW()
+          )
+          ON CONFLICT (team_id) DO UPDATE SET
+            team_name = EXCLUDED.team_name,
+            owner_id = EXCLUDED.owner_id,
+            member_ids = EXCLUDED.member_ids,
+            mode = EXCLUDED.mode,
+            score = EXCLUDED.score,
+            elapsed_seconds = EXCLUDED.elapsed_seconds,
+            case_scores = EXCLUDED.case_scores,
+            updated_at = EXCLUDED.updated_at
+        `;
       }
 
       return json({ synced: changed });
@@ -1065,10 +1159,12 @@ Deno.serve(async (req) => {
       return json({ error: 'Invite codes are disabled.' }, 403);
     }
 
-    const tokenAdmin = await verifyAdminToken(
-      req.headers.get('x-arena-admin') || String(payload.adminToken || ''),
-      serviceRoleKey
-    );
+    const tokenAdmin = adminTokenSecret
+      ? await verifyAdminToken(
+          req.headers.get('x-arena-admin') || String(payload.adminToken || ''),
+          adminTokenSecret
+        )
+      : false;
     const isAdmin = Boolean(
       tokenAdmin || user.app_metadata?.role === 'admin' || user.app_metadata?.admin === true
     );
@@ -1077,16 +1173,14 @@ Deno.serve(async (req) => {
     if (action === 'adminCreateGame') {
       const name = String(payload.name || '').trim();
       if (!name) return json({ error: 'Event name is required.' }, 400);
-      const { data: game, error } = await adminClient
-        .from('games')
-        .insert({
-          name,
-          case_id: String(payload.caseId || 'case-01'),
-          status: 'open',
-        })
-        .select('id, name, case_id, status, participant_count, created_at')
-        .single();
-      if (error) return json({ error: error.message }, 400);
+      const caseId = String(payload.caseId || 'case-01');
+      const gameRows = await sql`
+        INSERT INTO public.games (name, case_id, status)
+        VALUES (${name}, ${caseId}, 'open')
+        RETURNING id, name, case_id, status, participant_count, created_at
+      `;
+      const game = gameRows[0];
+      if (!game) return json({ error: 'Unable to create game.' }, 400);
       return json({
         id: game.id,
         name: game.name,
@@ -1098,53 +1192,64 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'adminSetGameStatus') {
-      const updates: Record<string, unknown> = { status: String(payload.status || 'open') };
+      const gameId = String(payload.gameId || '');
+      if (!UUID_RE.test(gameId)) return json({ error: 'Invalid game ID.' }, 400);
+      const status = String(payload.status || 'open');
       if (typeof payload.name === 'string' && payload.name.trim()) {
-        updates.name = payload.name.trim();
+        await sql`
+          UPDATE public.games
+          SET status = ${status}, name = ${payload.name.trim()}
+          WHERE id = ${gameId}::uuid
+        `;
+      } else {
+        await sql`
+          UPDATE public.games
+          SET status = ${status}
+          WHERE id = ${gameId}::uuid
+        `;
       }
-      const { error } = await adminClient
-        .from('games')
-        .update(updates)
-        .eq('id', String(payload.gameId || ''));
-      if (error) return json({ error: error.message }, 400);
       return json({ ok: true });
     }
 
     if (action === 'adminAnnounce') {
-      const { error } = await adminClient.from('announcements').insert({
-        title: String(payload.title || '').trim(),
-        message: String(payload.message || '').trim(),
-      });
-      if (error) return json({ error: error.message }, 400);
+      const title = String(payload.title || '').trim();
+      const message = String(payload.message || '').trim();
+      if (!title || !message) {
+        return json({ error: 'Title and message are required.' }, 400);
+      }
+      await sql`
+        INSERT INTO public.announcements (title, message)
+        VALUES (${title}, ${message})
+      `;
       return json({ ok: true });
     }
 
     if (action === 'adminListTeams') {
-      const [teamsRes, rankingsRes] = await Promise.all([
-        adminClient
-          .from('teams')
-          .select('id, name, member_ids')
-          .order('created_at', { ascending: true })
-          .limit(500),
-        adminClient
-          .from('rankings')
-          .select('id, team_id, team_name, mode, score, elapsed_seconds, case_scores')
-          .order('score', { ascending: false })
-          .limit(200),
+      const [teamRows, rankingRows] = await Promise.all([
+        sql`
+          SELECT id, name, member_ids
+          FROM public.teams
+          ORDER BY created_at ASC
+          LIMIT 500
+        `,
+        sql`
+          SELECT id, team_id, team_name, mode, score, elapsed_seconds, case_scores
+          FROM public.rankings
+          ORDER BY score DESC
+          LIMIT 200
+        `,
       ]);
-      if (teamsRes.error) return json({ error: teamsRes.error.message }, 400);
+
       return json({
-        teams: (teamsRes.data || []).map((t) => ({
+        teams: teamRows.map((t) => ({
           id: t.id,
           name: t.name,
           memberCount: Array.isArray(t.member_ids) ? t.member_ids.length : 0,
         })),
-        rankings: rankingsRes.error
-          ? []
-          : (rankingsRes.data || []).map((row) => ({
-              ...row,
-              case_scores: compactCaseScores(row.case_scores),
-            })),
+        rankings: rankingRows.map((row) => ({
+          ...row,
+          case_scores: compactCaseScores(row.case_scores),
+        })),
       });
     }
 
