@@ -503,15 +503,10 @@ export const cases: InvestigationCase[] = [
     incident: 'Stamped 16:30 PM library due-date slip and 04:45 PM voice note audio.',
     evidence: [
       {
-        type: 'DROPPED ITEM',
-        title: 'Dropped Item at Scene',
-        detail: 'Library slip stamped today (16:30 PM) for "Engineering Mathematics-I".',
-      },
-      {
-        type: 'AUDIO CLIP',
-        title: 'Voice Note Clip (04:45 PM)',
-        detail:
-          'Suspected culprit sent a voice note saying "I\'m at the railway station picking up my cousin!"—but background audio clearly plays the college 4:45 PM bell chime (no train sounds).',
+        type: 'IMAGE EVIDENCE',
+        title: 'Evidence QR Code',
+        detail: 'Scan or inspect this QR code to access the recovered case-09 evidence.',
+        image: '/assets/aistudio/WhatsApp_Image_2026-11-26_at_2.59.26_PM_8eccb1e7.jpeg',
       },
     ],
     suspects: [
